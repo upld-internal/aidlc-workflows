@@ -12,7 +12,8 @@
       "scopes": "scopes/",
       "knowledge": "knowledge/",
       "sensors": "sensors/",
-      "tools": "tools/"
+      "tools": "tools/",
+      "memory": "memory/"
     }
   }
 }

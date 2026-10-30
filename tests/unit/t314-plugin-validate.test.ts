@@ -21,6 +21,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   bundledPluginComposeTemplatePath,
+  parsePluginMemory,
   validatePluginRoot,
 } from "../../dist/claude/.claude/tools/aidlc-plugin-validate.ts";
 
@@ -237,7 +238,7 @@ describe("t314 standalone plugin validator", () => {
     expect(rules).toContain("manifest-shape");
   });
 
-  test("manifest contribution paths must be canonical and memory remains unsupported", () => {
+  test("manifest contribution paths must be canonical, memory included", () => {
     const root = fixture();
     renameSync(join(root, "stages"), join(root, "custom-stages"));
     const manifestPath = join(root, ".aidlc-plugin", "plugin.json");
@@ -245,7 +246,7 @@ describe("t314 standalone plugin validator", () => {
       aidlc: { contributes: Record<string, string> };
     };
     manifest.aidlc.contributes.stages = "custom-stages/";
-    manifest.aidlc.contributes.memory = "memory/";
+    manifest.aidlc.contributes.memory = "rules/";
     writeFileSync(
       manifestPath,
       `${JSON.stringify(manifest, null, 2)}\n`,
@@ -267,9 +268,58 @@ describe("t314 standalone plugin validator", () => {
         file: ".aidlc-plugin/plugin.json",
         rule: "manifest-shape",
         message:
-          "aidlc.contributes.memory is not supported by the current plugin projection",
+          'aidlc.contributes.memory must be "memory/" until configurable contribution paths are supported',
       }),
     );
+  });
+
+  // A plugin's rule files: the space's own file names, rules under ## headings.
+  function withMemory(files: Record<string, string>): string {
+    const root = fixture();
+    const manifestPath = join(root, ".aidlc-plugin", "plugin.json");
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf-8")) as {
+      aidlc: { contributes: Record<string, string> };
+    };
+    manifest.aidlc.contributes.memory = "memory/";
+    writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf-8");
+    for (const [rel, body] of Object.entries(files)) write(join(root, "memory", rel), body);
+    return root;
+  }
+
+  test("memory rule files in the space's shape validate", () => {
+    const root = withMemory({
+      "org.md": "# fixture rules\n\n<!-- a note -->\n\n## Testing Posture\n\n- Name the coverage measured.\n",
+      "phases/construction.md": "## Testing Standards\n\n- One test per boundary value.\n- Another.\n",
+      "team.md": "## Deployment\n\nTagged: yes\n",
+    });
+    const result = validatePluginRoot(root);
+    expect(result.errors.filter((finding) => finding.rule.startsWith("memory-"))).toEqual([]);
+    expect(result.valid).toBe(true);
+    expect(parsePluginMemory(readFileSync(join(root, "memory", "org.md"), "utf-8"))).toEqual({
+      sections: [{ heading: "Testing Posture", lines: ["- Name the coverage measured."] }],
+      strayLines: [],
+      hasFrontmatter: false,
+    });
+  });
+
+  test("a memory file outside the space's rule files, with frontmatter, or with a rule under no heading is refused", () => {
+    const root = withMemory({
+      "guidelines.md": "## Testing Posture\n\n- A rule.\n",
+      "phases/initialization.md": "## Setup\n\n- A rule.\n",
+      "project.md": "---\ntier_cap: balanced\n---\n\nA stray line.\n\n## Decided\n\n## Mandated\n\n- A rule.\n",
+    });
+    const result = validatePluginRoot(root);
+    const memoryFindings = result.errors
+      .filter((finding) => finding.rule.startsWith("memory-"))
+      .map((finding) => `${finding.file} ${finding.rule}: ${finding.message}`);
+    expect(memoryFindings).toEqual([
+      'memory/guidelines.md memory-filename: memory file "guidelines.md" is not one of the space\'s rule files (org.md, team.md, project.md, phases/ideation.md, phases/inception.md, phases/construction.md, phases/operation.md)',
+      'memory/phases/initialization.md memory-filename: memory file "phases/initialization.md" is not one of the space\'s rule files (org.md, team.md, project.md, phases/ideation.md, phases/inception.md, phases/construction.md, phases/operation.md)',
+      'memory/project.md memory-body: memory file carries YAML frontmatter, which the space\'s own file owns',
+      'memory/project.md memory-body: memory file has 1 line(s) under no ## heading (first: "A stray line.")',
+      'memory/project.md memory-body: memory section "## Decided" holds no rule line',
+    ]);
+    expect(result.valid).toBe(false);
   });
 
   test("dependencies name core and at most one base plugin, with a range npm can read", () => {

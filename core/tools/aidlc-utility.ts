@@ -528,6 +528,7 @@ import {
   contributionSources,
   copyProjectSurfaces,
   cutPluginFragment,
+  memoryContributionSources,
   hostListsPlugins,
   nextCompose,
   noPluginListLine,
@@ -1275,6 +1276,16 @@ function stripDisabledPluginContributions(
             pluginTouched = true;
           }
         }
+      }
+    }
+    // The plugin's rule blocks in the default space's memory files carry the
+    // same markers; the lines around them are the team's and stay.
+    for (const source of memoryContributionSources(runtimeProjectDir()).values()) {
+      const before = readFileSync(source.path, "utf-8");
+      const content = withFileLineEndings(before, (text) => removePluginFragments(text, plugin));
+      if (content !== before) {
+        writeFileSync(source.path, content, "utf-8");
+        pluginTouched = true;
       }
     }
     if (existsSync(sidecar)) {
@@ -6998,23 +7009,31 @@ export async function collectDoctorReport(
       for (const [h, text] of org.headings) {
         if (text.trim() !== "") orgPopulated.set(h, text);
       }
-      const drifts: Array<{ file: string; heading: string; orgSentence: string }> = [];
-      const staleSuppressed: Array<{ file: string; heading: string; orgSentence: string }> = [];
+      type Overlap = { file: string; heading: string; orgSentence: string; plugins: string[] };
+      const drifts: Overlap[] = [];
+      const staleSuppressed: Overlap[] = [];
       const today = new Date().toISOString().slice(0, 10);
+      // A plugin's composed rule block (plugin memory/ files) populates a
+      // heading like a team line does, and the overlap names the plugin so
+      // the reviewer knows whose rule to weigh. In a phase file only a
+      // plugin's block is read: the phase layer is the framework's own text
+      // otherwise, and never a team practice.
       for (const rule of rules) {
-        if (rule.scope !== "team" && rule.scope !== "project") continue;
+        if (rule.scope !== "team" && rule.scope !== "project" && rule.scope !== "phase") continue;
         const stale = isRuleStale(rule.frontmatter, today);
         for (const [h, text] of rule.headings) {
           if (text.trim() === "") continue;
           const orgText = orgPopulated.get(h);
           if (orgText === undefined) continue;
+          const plugins = [...(rule.pluginHeadings.get(h) ?? [])].sort();
+          if (rule.scope === "phase" && plugins.length === 0) continue;
           // First sentence of the org body under that heading, quoted
           // verbatim. Split on the first sentence terminator; fall back to
           // the whole first non-empty line when none is present.
           const firstLine = orgText.split("\n")[0] ?? orgText;
           const sentenceMatch = firstLine.match(/^.*?[.!?](?=\s|$)/);
           const orgSentence = (sentenceMatch ? sentenceMatch[0] : firstLine).trim();
-          const overlap = { file: rule.path, heading: h, orgSentence };
+          const overlap = { file: rule.path, heading: h, orgSentence, plugins };
           if (stale) {
             staleSuppressed.push(overlap);
           } else {
@@ -7022,6 +7041,8 @@ export async function collectDoctorReport(
           }
         }
       }
+      const describe = (d: Overlap, arrow: string): string =>
+        `${d.file} ## ${d.heading}${d.plugins.length > 0 ? ` (plugin ${d.plugins.join(", ")})` : ""} ${arrow} org "${d.orgSentence}"`;
       if (drifts.length === 0) {
         results.push({
           pass: true,
@@ -7029,7 +7050,7 @@ export async function collectDoctorReport(
         });
       } else {
         const detail = drifts
-          .map((d) => `${d.file} ## ${d.heading} <-> org "${d.orgSentence}"`)
+          .map((d) => describe(d, "<->"))
           .join("; ");
         results.push({
           pass: true,
@@ -7038,7 +7059,7 @@ export async function collectDoctorReport(
       }
       if (staleSuppressed.length > 0) {
         const detail = staleSuppressed
-          .map((d) => `${d.file} ## ${d.heading} ⇄ org "${d.orgSentence}"`)
+          .map((d) => describe(d, "⇄"))
           .join("; ");
         results.push({
           pass: true,

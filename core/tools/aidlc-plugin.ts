@@ -56,6 +56,8 @@ import {
 } from "./aidlc-transaction.ts";
 import {
   hostIdSegment,
+  PLUGIN_MEMORY_FILES,
+  pluginMemoryRecordKey,
   pluginStageSlugs,
   readPluginBase,
   scopeIncludes,
@@ -1496,8 +1498,37 @@ export interface ContributionSource {
   path: string;
   content: string;
   parsed: Record<string, unknown>;
-  kind: "stage" | "agent";
+  kind: "stage" | "agent" | "memory";
   twins?: Array<{ path: string; rel: string; content: string | null; toml: boolean }>;
+}
+
+// The default space's memory tree, where compose merges a plugin's memory/
+// rules: the seed every project starts from. Other spaces take their files
+// from it at `space create`, blocks included.
+export function defaultSpaceMemoryDir(projectDir: string): string {
+  return join(projectDir, "aidlc", "spaces", "default", "memory");
+}
+
+// The memory files compose may have merged into, by their sidecar key, read as
+// compose wrote them. A file that is not there has no record to check.
+export function memoryContributionSources(projectDir: string): Map<string, ContributionSource> {
+  const sources = new Map<string, ContributionSource>();
+  const memoryDir = defaultSpaceMemoryDir(projectDir);
+  for (const rel of PLUGIN_MEMORY_FILES) {
+    const path = join(memoryDir, ...rel.split("/"));
+    try {
+      if (!lstatSync(path).isFile()) continue;
+      sources.set(pluginMemoryRecordKey(rel), {
+        path,
+        content: readFileSync(path, "utf-8").replace(/\r\n/g, "\n"),
+        parsed: {},
+        kind: "memory",
+      });
+    } catch {
+      // Absent, or unreadable: doctor's workspace rows say so.
+    }
+  }
+  return sources;
 }
 
 export function contributionSources(
@@ -1550,6 +1581,7 @@ export function contributionSources(
       }
     }
   }
+  for (const [key, source] of memoryContributionSources(projectDir)) sources.set(key, source);
   return sources;
 }
 
@@ -1804,6 +1836,13 @@ function pruneContributions(stagedProject: string, harnessDir: string, key: stri
       if (after !== before) writeFileSync(twin, after);
     }
   }
+  // The default space's memory files carry the plugin's rule blocks, marked
+  // like fragments; the team's own lines around them stay.
+  for (const source of memoryContributionSources(stagedProject).values()) {
+    const before = readFileSync(source.path, "utf-8");
+    const after = withFileLineEndings(before, (text) => removeFragments(text, key, source.path));
+    if (after !== before) writeFileSync(source.path, after);
+  }
   rmSync(sidecar, { force: true });
 }
 
@@ -2049,7 +2088,8 @@ function compositionIsCurrent(
   // plugin that is off merges nothing, so it has no record to miss.
   if (
     (selection === null || selection.has(plugin.key)) &&
-    regularFiles(join(plugin.root, "contributions")).some((path) => path.endsWith(".md")) &&
+    [join(plugin.root, "contributions"), join(plugin.root, "memory")]
+      .some((dir) => regularFiles(dir).some((path) => path.endsWith(".md"))) &&
     !existsSync(join(harnessDataDir(projectDir, harnessDir), `plugin-contrib-${plugin.key}.json`))
   ) return false;
   if ((selection === null || selection.has(plugin.key)) && recordedAdditionGone(projectDir, harnessDir, plugin.key)) {

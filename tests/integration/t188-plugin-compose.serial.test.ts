@@ -1156,6 +1156,9 @@ describe("t188 plugin compose — emit + compose the contribution seam", () => {
       const tables = readFileSync(join(skillsRoot, "aidlc", "tables.md"), "utf-8");
       expect(tables).toContain("test-pro-validation");
       expect(existsSync(join(skillsRoot, "test-pro-validation", "SKILL.md"))).toBe(true);
+      const orgPath = join(project, "aidlc", "spaces", "default", "memory", "org.md");
+      const composedOrg = readFileSync(orgPath, "utf-8");
+      expect(composedOrg).toContain("<!-- plugin:test-pro:section:testing-posture:0:");
 
       const planned = config("--yes", "--dry-run", "--json");
       const parsed = JSON.parse(planned.stdout.slice(planned.stdout.indexOf("{"))) as {
@@ -1165,9 +1168,10 @@ describe("t188 plugin compose — emit + compose the contribution seam", () => {
       expect(conflicts, `${planned.stdout}${planned.stderr}`.slice(0, 2000)).toEqual([]);
       const refreshed = config("--yes");
       expect(refreshed.status, `${refreshed.stdout}${refreshed.stderr}`).toBe(0);
-      // The composed row and the plugin's runner survive the refresh.
+      // The composed row, the plugin's runner, and its memory block survive the refresh.
       expect(readFileSync(join(skillsRoot, "aidlc", "tables.md"), "utf-8")).toContain("test-pro-validation");
       expect(existsSync(join(skillsRoot, "test-pro-validation", "SKILL.md"))).toBe(true);
+      expect(readFileSync(orgPath, "utf-8")).toBe(composedOrg);
     },
   );
 
@@ -1391,6 +1395,27 @@ describe("t188 plugin compose — emit + compose the contribution seam", () => {
     expect(existsSync(join(project, ".claude", "scopes", "test-pro-validation.md"))).toBe(true);
     expect(existsSync(join(project, ".claude", "agents", "test-pro-metrics-agent.md"))).toBe(true);
     expect(existsSync(join(project, ".claude", "knowledge", "test-pro-metrics-agent", "methodology.md"))).toBe(true);
+  });
+
+  test("plugin memory rules merge under their headings in the default space's memory, recorded in the sidecar", () => {
+    const memoryDir = join(project, "aidlc", "spaces", "default", "memory");
+    const org = readFileSync(join(memoryDir, "org.md"), "utf-8");
+    // Inside the Testing Posture section: after the seed's own lines, before the next heading.
+    const section = org.slice(org.indexOf("## Testing Posture"), org.indexOf("## Guard Policy"));
+    expect(section).toContain("- **Methodology**: test-after");
+    expect(section).toMatch(/<!-- plugin:test-pro:section:testing-posture:0:[0-9a-f]{8} -->\n- Every Bolt's test report names the branch and line coverage it measured[^\n]*\n<!-- \/plugin:test-pro:section:testing-posture:0:[0-9a-f]{8} -->/);
+    expect(section.indexOf("- **Methodology**")).toBeLessThan(section.indexOf("<!-- plugin:test-pro:"));
+    const construction = readFileSync(join(memoryDir, "phases", "construction.md"), "utf-8");
+    const standards = construction.slice(construction.indexOf("## Testing Standards"), construction.indexOf("## Security"));
+    expect(standards).toContain("<!-- plugin:test-pro:section:testing-standards:0:");
+    expect(standards).toContain("one step past each");
+    // The memory files are not copied as primitives.
+    expect(existsSync(join(project, ".claude", "memory"))).toBe(false);
+    const sidecar = JSON.parse(readFileSync(join(project, ".claude", "tools", "data", "plugin-contrib-test-pro.json"), "utf-8"));
+    expect(sidecar["memory/org.md"]?.fragments?.map((f: { anchor: string }) => f.anchor)).toEqual(["section:testing-posture"]);
+    expect(sidecar["memory/phases/construction.md"]?.fragments?.map((f: { anchor: string }) => f.anchor)).toEqual(["section:testing-standards"]);
+    // The copy the harness includes read follows the space's file.
+    expect(readFileSync(join(project, "aidlc", "active-memory", "org.md"), "utf-8")).toContain("names the branch and line coverage it measured");
   });
 
   test("pre-sidecar plugin knowledge ownership is backfilled, retained, and excluded when deselected", () => {
@@ -3283,6 +3308,8 @@ describe("t188 plugin compose — emit + compose the contribution seam", () => {
     const body = stageBody(project, "construction", "build-and-test");
     const count = (body.match(/Step 8a \(test-pro\)/g) ?? []).length;
     expect(count).toBe(1);
+    const org = readFileSync(join(project, "aidlc", "spaces", "default", "memory", "org.md"), "utf-8");
+    expect((org.match(/<!-- plugin:test-pro:section:testing-posture:0:/g) ?? []).length).toBe(1);
   });
 
   // --- Upgrades: re-composing a newer version of the SAME plugin ---
@@ -3443,6 +3470,159 @@ describe("t188 plugin compose — emit + compose the contribution seam", () => {
     });
     expect(readFileSync(stagePath, "utf-8")).not.toContain(`plugin:${name}:`);
     expect(existsSync(sidecarPath)).toBe(false);
+  });
+
+  // --- Memory rules: a plugin's memory/ files into the default space's memory ---
+  // A scope file gives the plugin an installed identity, so select-plugins
+  // knows it and the disable-time strip runs for it.
+  const memoryIdentityScope = (name: string): string => [
+    "---", `name: ${name}`, `plugin: ${name}`,
+    "depth: Standard", "keywords:", "  - synthetic",
+    "description: synthetic scope carrying the memory plugin identity", "skeleton: off", "---", "",
+    `# ${name}`, "",
+  ].join("\n");
+  const memorySeed = (rel: string): string =>
+    readFileSync(join(CLAUDE_DIST, "tools", "data", "memory-seed", rel), "utf-8");
+  const runDoctor = (proj: string): string => {
+    const doctor = spawnSync(BUN, [join(proj, ".claude", "tools", "aidlc-utility.ts"), "doctor", "--verbose"], {
+      cwd: proj, encoding: "utf-8", timeout: remainingOperationTimeoutMs(NATIVE_RUNTIME_CASE_TIMEOUT_MS),
+      env: { ...process.env, CLAUDE_PROJECT_DIR: proj },
+    });
+    return `${doctor.stdout}${doctor.stderr}`;
+  };
+
+  test("memory rules merge as plugin-owned blocks per heading, as a set-union, idempotently, and strip on disable", () => {
+    const name = "syn-memory";
+    const orgRules = (rule: string): string => [
+      "# syn-memory rules", "",
+      "## Testing Posture", "",
+      // The seed already holds this line: the union does not repeat it.
+      "- **Methodology**: test-after",
+      `- ${rule}`, "",
+      // A heading the seed lacks is created inside the block.
+      "## Acme Gate", "",
+      "- A release waits for the gate.", "",
+    ].join("\n");
+    const { drops, proj } = composeSynthetic(name, {
+      [`scopes/${name}.md`]: memoryIdentityScope(name),
+      "memory/org.md": orgRules("Coverage is measured, not claimed."),
+      "memory/team.md": "## Testing Posture\n\n- The team runs the suite before every merge.\n",
+      "memory/phases/construction.md": "## Testing Standards\n\n- One test per boundary value.\n",
+    });
+    expect(drops).not.toContain("memory");
+    const memoryDir = join(proj, "aidlc", "spaces", "default", "memory");
+    const orgPath = join(memoryDir, "org.md");
+    // The project had no memory tree: compose seeded the files from the engine's bundled seed, then merged.
+    const org = readFileSync(orgPath, "utf-8");
+    const seedOrg = memorySeed("org.md");
+    expect(org.startsWith(seedOrg.slice(0, seedOrg.indexOf("## Guard Policy")).trimEnd())).toBe(true);
+    const posture = org.slice(org.indexOf("## Testing Posture"), org.indexOf("## Guard Policy"));
+    expect((posture.match(/\*\*Methodology\*\*: test-after/g) ?? []).length).toBe(1);
+    const block = posture.match(/<!-- plugin:syn-memory:section:testing-posture:0:([0-9a-f]{8}) -->\n([\s\S]*?)\n<!-- \/plugin:syn-memory:section:testing-posture:0:\1 -->/);
+    expect(block?.[2]).toBe("- Coverage is measured, not claimed.");
+    expect(org).toMatch(/<!-- plugin:syn-memory:section:acme-gate:0:[0-9a-f]{8} -->\n## Acme Gate\n\n- A release waits for the gate\.\n<!-- \/plugin:syn-memory:section:acme-gate:0:[0-9a-f]{8} -->\n$/);
+    expect(readFileSync(join(memoryDir, "team.md"), "utf-8")).toContain("<!-- plugin:syn-memory:section:testing-posture:0:");
+    expect(readFileSync(join(memoryDir, "phases", "construction.md"), "utf-8")).toContain("- One test per boundary value.\n<!-- /plugin:syn-memory:section:testing-standards:0:");
+    const sidecarPath = join(proj, ".claude", "tools", "data", `plugin-contrib-${name}.json`);
+    const sidecar = () => JSON.parse(readFileSync(sidecarPath, "utf-8")) as Record<string, { fragments?: Array<{ anchor: string; hash: string }> }>;
+    expect(Object.keys(sidecar()).sort()).toEqual(["memory/org.md", "memory/phases/construction.md", "memory/team.md"]);
+    expect(sidecar()["memory/org.md"].fragments?.map((f) => f.anchor)).toEqual(["section:acme-gate", "section:testing-posture"]);
+
+    // Doctor: the composed surface is whole, and the team-layer overlap names the plugin.
+    const doctored = runDoctor(proj);
+    const surfaceRow = doctored.split("\n").find((l) => l.includes("Composed plugin surface"));
+    expect(surfaceRow, doctored.slice(0, 2000)).toContain("all enabled plugin stages and recorded contributions are present");
+    const driftRow = doctored.split("\n").find((l) => l.includes("Rule drift:")) ?? "";
+    expect(driftRow).toContain("team.md ## Testing Posture (plugin syn-memory) <-> org");
+
+    // Re-running composes nothing new.
+    const orgBefore = readFileSync(orgPath);
+    expect(recomposeSynthetic(proj, name, {})).toBe("");
+    expect(readFileSync(orgPath).equals(orgBefore)).toBe(true);
+
+    // A changed rule replaces the block; a file the plugin stops shipping
+    // leaves the memory file and the record.
+    rmSync(join(proj, `_plugin-${name}`, "memory", "phases", "construction.md"));
+    recomposeSynthetic(proj, name, { "memory/org.md": orgRules("Coverage is measured twice.") });
+    const upgraded = readFileSync(orgPath, "utf-8");
+    expect(upgraded).not.toContain("Coverage is measured, not claimed.");
+    expect((upgraded.match(/<!-- plugin:syn-memory:section:testing-posture:0:/g) ?? []).length).toBe(1);
+    expect(upgraded).toContain("- Coverage is measured twice.");
+    expect(readFileSync(join(memoryDir, "phases", "construction.md"), "utf-8")).toBe(memorySeed("phases/construction.md"));
+    expect(Object.keys(sidecar()).sort()).toEqual(["memory/org.md", "memory/team.md"]);
+
+    // A block removed by hand is a gap doctor names.
+    writeFileSync(orgPath, upgraded.replace(/<!-- plugin:syn-memory:section:acme-gate:0:[\s\S]*?<!-- \/plugin:syn-memory:section:acme-gate:0:[0-9a-f]{8} -->\n/, ""));
+    const gapped = runDoctor(proj);
+    expect(gapped).toContain("Composed plugin surface: 1 missing composition item(s)");
+    expect(gapped).toContain("memory memory/org.md");
+    recomposeSynthetic(proj, name, {});
+    expect(readFileSync(orgPath, "utf-8")).toContain("## Acme Gate");
+
+    // Turning the plugin off strips exactly its blocks: the files read as the seed again.
+    const strip = spawnSync(BUN, [join(proj, ".claude", "tools", "aidlc-utility.ts"), "select-plugins", "aidlc"], {
+      cwd: proj, encoding: "utf-8", timeout: TIMEOUT_MS - 5_000,
+      env: { ...process.env, CLAUDE_PROJECT_DIR: proj, AIDLC_HARNESS_DIR: ".claude" },
+    });
+    expect(strip.status, strip.stderr).toBe(0);
+    expect(readFileSync(orgPath, "utf-8")).toBe(seedOrg);
+    expect(readFileSync(join(memoryDir, "team.md"), "utf-8")).toBe(memorySeed("team.md"));
+    expect(existsSync(sidecarPath)).toBe(false);
+  });
+
+  test("memory blocks never touch the team's own lines, and two plugins order by name under one heading", () => {
+    const first = "syn-memory-a";
+    const { proj } = composeSynthetic(first, {
+      [`scopes/${first}.md`]: memoryIdentityScope(first),
+      "memory/project.md": "## Mandated\n\n- Plugin A's rule.\n",
+    }, ".claude", (p) => {
+      // The team wrote into the file before any plugin composed.
+      const memoryDir = join(p, "aidlc", "spaces", "default", "memory");
+      mkdirSync(memoryDir, { recursive: true });
+      writeFileSync(join(memoryDir, "project.md"), "# Project\n\n## Mandated\n\n- The team's own line.\n\n## Forbidden\n\n- Nothing yet.\n");
+    });
+    const projectPath = join(proj, "aidlc", "spaces", "default", "memory", "project.md");
+    const second = "syn-memory-b";
+    prepareSyntheticPlugin(proj, second, {
+      [`scopes/${second}.md`]: memoryIdentityScope(second),
+      "memory/project.md": "## Mandated\n\n- Plugin B's rule.\n",
+    });
+    recomposeSynthetic(proj, second, {});
+    const merged = readFileSync(projectPath, "utf-8");
+    const mandated = merged.slice(merged.indexOf("## Mandated"), merged.indexOf("## Forbidden"));
+    expect(mandated.indexOf("- The team's own line.")).toBeLessThan(mandated.indexOf("plugin:syn-memory-a:"));
+    expect(mandated.indexOf("plugin:syn-memory-a:")).toBeLessThan(mandated.indexOf("plugin:syn-memory-b:"));
+    expect(merged).toContain("## Forbidden\n\n- Nothing yet.\n");
+    // Each plugin's strip leaves the other's block and the team's lines.
+    const strip = spawnSync(BUN, [join(proj, ".claude", "tools", "aidlc-utility.ts"), "select-plugins", `aidlc,${second}`], {
+      cwd: proj, encoding: "utf-8", timeout: TIMEOUT_MS - 5_000,
+      env: { ...process.env, CLAUDE_PROJECT_DIR: proj, AIDLC_HARNESS_DIR: ".claude" },
+    });
+    expect(strip.status, strip.stderr).toBe(0);
+    const afterStrip = readFileSync(projectPath, "utf-8");
+    expect(afterStrip).not.toContain("syn-memory-a");
+    expect(afterStrip).toContain("- Plugin B's rule.");
+    expect(afterStrip).toContain("- The team's own line.");
+    expect(afterStrip).toContain("## Forbidden\n\n- Nothing yet.\n");
+  });
+
+  test("a project composed by compose.ts upgrades its memory rules through plugin sync", () => {
+    const name = "syn-upgrade-memory";
+    const { proj } = composeSynthetic(name, {
+      ...upgradeFiles(name, "v1", "after-step:8"),
+      "memory/org.md": "## Deployment\n\n- Rule v1.\n",
+    });
+    const orgPath = join(proj, "aidlc", "spaces", "default", "memory", "org.md");
+    expect(readFileSync(orgPath, "utf-8")).toContain("- Rule v1.");
+    const sync = syncSynthetic(proj, name, {
+      ...upgradeFiles(name, "v2", "after-step:8"),
+      "memory/org.md": "## Deployment\n\n- Rule v2.\n",
+    });
+    expect(sync.status, sync.stderr).toBe(0);
+    const org = readFileSync(orgPath, "utf-8");
+    expect(org).not.toContain("- Rule v1.");
+    expect(org).toContain("- Rule v2.");
+    expect((org.match(new RegExp(`<!-- plugin:${name}:section:deployment:0:`, "g")) ?? []).length).toBe(1);
   });
 
   test("a persona fragment the plugin moved leaves the persona and its Codex twin exactly", () => {

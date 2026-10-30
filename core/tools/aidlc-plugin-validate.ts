@@ -55,6 +55,8 @@ export type PluginValidationRule =
   | "agent-filename"
   | "agent-name"
   | "agent-owner"
+  | "memory-filename"
+  | "memory-body"
   | "base-reference"
   | "base-root"
   | "duplicate-artifact-producer"
@@ -144,6 +146,7 @@ const CANONICAL_CONTRIBUTION_PATHS: Record<string, string> = {
   sensors: "sensors/",
   knowledge: "knowledge/",
   tools: "tools/",
+  memory: "memory/",
 };
 const PLUGIN_SYMLINK_SCAN_DIRS = [
   ".aidlc-plugin",
@@ -154,8 +157,116 @@ const PLUGIN_SYMLINK_SCAN_DIRS = [
   "scopes",
   "agents",
   "knowledge",
+  "memory",
   "hooks",
 ] as const;
+
+// The rule files a plugin may ship under memory/, by their path in a space's
+// memory tree: the same files the engine seeds from core/memory/, so a rule
+// lands in the layer (org, team, project, phase) the team reads it in. The
+// compose hook, plugin sync, the disable-time strip and doctor resolve a
+// recorded memory target to a file only through this list, never by building
+// a path from the record.
+export const PLUGIN_MEMORY_FILES = [
+  "org.md",
+  "team.md",
+  "project.md",
+  "phases/ideation.md",
+  "phases/inception.md",
+  "phases/construction.md",
+  "phases/operation.md",
+] as const;
+export type PluginMemoryFile = (typeof PLUGIN_MEMORY_FILES)[number];
+// The contribution sidecar key for a memory file's record.
+export const PLUGIN_MEMORY_RECORD_PREFIX = "memory/";
+
+export function pluginMemoryRecordKey(rel: PluginMemoryFile): string {
+  return `${PLUGIN_MEMORY_RECORD_PREFIX}${rel}`;
+}
+
+// The memory file a sidecar key names, or null when the key is not a memory
+// record (a stage or persona slug) or names a file outside the list.
+export function pluginMemoryFileOfRecord(key: string): PluginMemoryFile | null {
+  if (!key.startsWith(PLUGIN_MEMORY_RECORD_PREFIX)) return null;
+  const rel = key.slice(PLUGIN_MEMORY_RECORD_PREFIX.length);
+  return (PLUGIN_MEMORY_FILES as readonly string[]).includes(rel) ? rel as PluginMemoryFile : null;
+}
+
+// One `## Heading` of a plugin memory file with the rule lines under it, as
+// the compose hook merges them: every non-blank line that is not an HTML
+// comment, trimmed of trailing whitespace. A heading that appears twice
+// holds the lines of both occurrences.
+export interface PluginMemorySection {
+  heading: string;
+  lines: string[];
+}
+
+export interface PluginMemoryParse {
+  sections: PluginMemorySection[];
+  // Non-blank lines before the first `## ` heading other than one `# title`
+  // line and HTML comments; a rule there belongs under no heading.
+  strayLines: string[];
+  hasFrontmatter: boolean;
+}
+
+// The sentinel seam this parser and the compose hook's copy share: the hook
+// ships verbatim into every plugin and cannot import the installed engine, so
+// a change here is a change there too (`parsePluginMemory` in
+// scripts/plugin-hooks-template/compose.ts).
+export function parsePluginMemory(raw: string): PluginMemoryParse {
+  const normalized = raw.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n");
+  const sections: PluginMemorySection[] = [];
+  const strayLines: string[] = [];
+  // Reported as its own finding; the lines after it are still read.
+  const frontmatter = normalized.match(/^---\n[\s\S]*?\n---(?:\n|$)/);
+  const hasFrontmatter = frontmatter !== null;
+  const text = frontmatter ? normalized.slice(frontmatter[0].length) : normalized;
+  let current: PluginMemorySection | null = null;
+  let inFence = false;
+  let inComment = false;
+  let sawTitle = false;
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trimEnd();
+    const trimmed = line.trim();
+    if (/^```/.test(trimmed)) {
+      inFence = !inFence;
+      (current?.lines ?? strayLines).push(line);
+      continue;
+    }
+    if (inFence) {
+      (current?.lines ?? strayLines).push(line);
+      continue;
+    }
+    if (inComment) {
+      if (trimmed.includes("-->")) inComment = false;
+      continue;
+    }
+    if (trimmed.startsWith("<!--")) {
+      if (!trimmed.includes("-->")) inComment = true;
+      continue;
+    }
+    if (/^## /.test(line)) {
+      const heading = line.slice(3).trim();
+      current = sections.find((section) => section.heading === heading) ?? null;
+      if (!current) {
+        current = { heading, lines: [] };
+        sections.push(current);
+      }
+      continue;
+    }
+    if (trimmed === "") continue;
+    if (current) {
+      current.lines.push(line);
+      continue;
+    }
+    if (!sawTitle && /^# /.test(line)) {
+      sawTitle = true;
+      continue;
+    }
+    strayLines.push(line);
+  }
+  return { sections, strayLines, hasFrontmatter };
+}
 
 type PluginAuthoringContext = {
   agents: string[];
@@ -230,15 +341,6 @@ function contributionPathIssues(
         key,
         message: `aidlc.contributes.${key} must be a non-empty relative path`,
         fix: `Point "${key}" at the corresponding canonical plugin subtree.`,
-      });
-      continue;
-    }
-    if (key === "memory") {
-      issues.push({
-        key,
-        message:
-          "aidlc.contributes.memory is not supported by the current plugin projection",
-        fix: "Remove the memory contribution until memory projection ships.",
       });
       continue;
     }
@@ -1293,6 +1395,70 @@ function validateAgents(
   }
 }
 
+// A plugin's rule files: one of the seed's files by name, no frontmatter (the
+// space's own file carries the team's), and every rule under a `## Heading`
+// that holds at least one line, as the merge puts a section's lines under
+// that heading in the space's file.
+function validateMemory(
+  root: string,
+  findings: MutableFindings,
+): void {
+  const memoryRoot = join(root, "memory");
+  const allowed = PLUGIN_MEMORY_FILES.join(", ");
+  for (const file of scanPluginFiles(memoryRoot).files) {
+    const rel = posixRelative(memoryRoot, file);
+    const displayFile = posixRelative(root, file);
+    if (!(PLUGIN_MEMORY_FILES as readonly string[]).includes(rel)) {
+      addError(
+        findings,
+        displayFile,
+        "memory-filename",
+        `memory file "${rel}" is not one of the space's rule files (${allowed})`,
+        `Move the rules into one of memory/{${allowed.replaceAll(", ", ",")}}; a space reads no other file.`,
+      );
+      continue;
+    }
+    const parsed = parsePluginMemory(readFileSync(file, "utf-8"));
+    if (parsed.hasFrontmatter) {
+      addError(
+        findings,
+        displayFile,
+        "memory-body",
+        "memory file carries YAML frontmatter, which the space's own file owns",
+        "Remove the frontmatter block; ship rule lines under ## headings only.",
+      );
+    }
+    if (parsed.strayLines.length > 0) {
+      addError(
+        findings,
+        displayFile,
+        "memory-body",
+        `memory file has ${parsed.strayLines.length} line(s) under no ## heading (first: "${parsed.strayLines[0].trim()}")`,
+        "Put every rule under the ## heading it belongs to; only one # title line and HTML comments may precede the first heading.",
+      );
+    }
+    if (parsed.sections.length === 0) {
+      addError(
+        findings,
+        displayFile,
+        "memory-body",
+        "memory file has no ## heading",
+        "Add a ## heading (for example ## Testing Posture) with the rule lines under it, or remove the file.",
+      );
+    }
+    for (const section of parsed.sections) {
+      if (section.lines.length > 0) continue;
+      addError(
+        findings,
+        displayFile,
+        "memory-body",
+        `memory section "## ${section.heading}" holds no rule line`,
+        "Add at least one rule line under the heading, or remove the heading.",
+      );
+    }
+  }
+}
+
 function validateTools(
   root: string,
   findings: MutableFindings,
@@ -1422,6 +1588,7 @@ export function validatePluginRoot(
   validateContributions(root, pluginName, findings, options.coreStageSlugs, options.coreAgentSlugs);
   validateScopes(root, pluginName, findings, base, baseCheckout?.stages ?? null, options.coreStageSlugs);
   validateAgents(root, pluginName, findings);
+  validateMemory(root, findings);
   validateTools(root, findings);
   const composeHook = validateComposeHook(
     root,

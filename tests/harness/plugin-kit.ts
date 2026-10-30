@@ -217,6 +217,7 @@ export type PluginFindingCode =
   | "agent-schema"
   | "duplicate-artifact-producer"
   | "tools-payload"
+  | "memory-schema"
   | "compose-hook-stale"
   | "plugin-root";
 
@@ -297,6 +298,7 @@ function sharedFindingCode(rule: PluginValidationRule): PluginFindingCode {
   if (rule === "contribution-path") return "contribution-path";
   if (rule === "stage-body") return "stage-body";
   if (rule === "tools-payload") return "tools-payload";
+  if (rule === "memory-filename" || rule === "memory-body") return "memory-schema";
   if (
     rule === "compose-hook-stale" ||
     rule === "compose-template-missing"

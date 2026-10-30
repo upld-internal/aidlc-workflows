@@ -17,8 +17,10 @@
 // Steps: (1) copy new stages/scopes/agents/knowledge/sensors/tools with
 // {{HARNESS_DIR}} substitution, no-clobber; (2) merge contributions
 // (produces/consumes/sensors set-union +
-// prose fragments spliced) into stage SOURCE — durable across recompiles;
-// (3) recompile the graph. Idempotent + short-circuits when nothing changed.
+// prose fragments spliced) into stage SOURCE — durable across recompiles, and
+// the plugin's memory/ rules into the default space's memory files, one
+// sentinel block per heading; (3) recompile the graph. Idempotent +
+// short-circuits when nothing changed.
 
 import {
   existsSync,
@@ -2248,9 +2250,201 @@ function spliceFragment(
   return content.slice(0, base) + "\n" + block + "\n" + content.slice(base);
 }
 
+// --- memory rules ------------------------------------------------------------
+// A plugin's memory/ files carry rule lines under `## Heading`s, in the files
+// of a space's memory tree (the same names the engine seeds). Each heading
+// merges into the default space's file of that name as ONE sentinel block,
+// `<!-- plugin:<name>:section:<heading-slug>:0:<hash> -->`: the prose
+// fragment's own marker shape, so the installed engine's readers (doctor's
+// composed-surface check, the disable-time strip, prune, the refresh strip)
+// handle it without a second mechanism. Set-union: a line the section already
+// holds outside any plugin block is not repeated. The merge never edits a
+// line it did not write.
+
+const DEFAULT_MEMORY_DIR = join(PROJECT_DIR, "aidlc", "spaces", "default", "memory");
+// The engine's bundled seed of those files, copied out when a project's file
+// is still missing (what the first /aidlc does), so a plugin's rules land
+// before the person's first run as well as after it.
+const MEMORY_SEED_DIR = join(HARNESS_DIR, "tools", "data", "memory-seed");
+const MEMORY_FILES = [
+  "org.md",
+  "team.md",
+  "project.md",
+  "phases/ideation.md",
+  "phases/inception.md",
+  "phases/construction.md",
+  "phases/operation.md",
+];
+const MEMORY_RECORD_PREFIX = "memory/";
+const MEMORY_ANCHOR_PREFIX = "section:";
+
+// A sidecar key's memory file, through the list only: a key is project data.
+function memoryFileOfRecord(key: string): string | null {
+  if (!key.startsWith(MEMORY_RECORD_PREFIX)) return null;
+  const rel = key.slice(MEMORY_RECORD_PREFIX.length);
+  return MEMORY_FILES.includes(rel) ? rel : null;
+}
+
+function headingSlug(heading: string): string {
+  const slug = heading.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return slug || "untitled";
+}
+
+interface MemorySection { heading: string; lines: string[]; }
+
+// The validator's reading of a plugin memory file (`parsePluginMemory` in
+// aidlc-plugin-validate.ts): rule lines under `## ` headings, HTML comments
+// and blank lines dropped, fences kept whole. This file cannot import the
+// installed engine's copy, so the two stay the same by hand.
+function parsePluginMemory(raw: string): MemorySection[] {
+  const text = raw.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").replace(/^---\n[\s\S]*?\n---(?:\n|$)/, "");
+  const sections: MemorySection[] = [];
+  let current: MemorySection | null = null;
+  let inFence = false;
+  let inComment = false;
+  for (const rawLine of text.split("\n")) {
+    const line = rawLine.trimEnd();
+    const trimmed = line.trim();
+    if (/^```/.test(trimmed)) {
+      inFence = !inFence;
+      current?.lines.push(line);
+      continue;
+    }
+    if (inFence) { current?.lines.push(line); continue; }
+    if (inComment) {
+      if (trimmed.includes("-->")) inComment = false;
+      continue;
+    }
+    if (trimmed.startsWith("<!--")) {
+      if (!trimmed.includes("-->")) inComment = true;
+      continue;
+    }
+    if (/^## /.test(line)) {
+      const heading = line.slice(3).trim();
+      current = sections.find((section) => section.heading === heading) ?? null;
+      if (!current) {
+        current = { heading, lines: [] };
+        sections.push(current);
+      }
+      continue;
+    }
+    if (trimmed === "" || !current) continue;
+    current.lines.push(line);
+  }
+  return sections;
+}
+
+// Where `## heading` starts in a memory file and where its section ends (the
+// next `## ` line, or the end), skipping frontmatter and fenced code; null
+// when the file has no such heading.
+function memorySectionSpan(content: string, heading: string): { start: number; end: number } | null {
+  const fm = content.match(/^---\n[\s\S]*?\n---\n/);
+  let offset = fm ? fm[0].length : 0;
+  let inFence = false;
+  let start = -1;
+  for (const line of content.slice(offset).split("\n")) {
+    const lineStart = offset;
+    offset += line.length + 1;
+    if (/^```/.test(line.trim())) { inFence = !inFence; continue; }
+    if (inFence || !/^## /.test(line)) continue;
+    if (start !== -1) return { start, end: lineStart };
+    if (line.slice(3).trim() === heading) start = lineStart;
+  }
+  return start === -1 ? null : { start, end: content.length };
+}
+
+// A rule line as the set-union compares it: bullet marker and spacing aside.
+function ruleLineKey(line: string): string {
+  return line.trim().replace(/^[-*+]\s+/, "").replace(/\s+/g, " ");
+}
+
+// Every sentinel block in a span: [start, end) of the whole block, with its
+// plugin and anchor.
+function sentinelBlocks(content: string, from: number, to: number): Array<{ plugin: string; anchor: string; start: number; end: number }> {
+  const blocks: Array<{ plugin: string; anchor: string; start: number; end: number }> = [];
+  const span = content.slice(from, to);
+  for (const m of span.matchAll(/<!-- plugin:([^:\n]+):(.+?):(\d+):([0-9a-f]+) -->/g)) {
+    const close = `<!-- /plugin:${m[1]}:${m[2]}:${m[3]}:${m[4]} -->`;
+    const closeAt = span.indexOf(close, m.index! + m[0].length);
+    if (closeAt === -1) continue;
+    blocks.push({ plugin: m[1], anchor: m[2], start: from + m.index!, end: from + closeAt + close.length });
+  }
+  return blocks;
+}
+
+// Merge one heading's rule lines into a memory file. Returns the new text and
+// the block's record, or a null record when every line is already there (an
+// earlier block of this plugin for the heading is then cut).
+function mergeMemorySection(
+  content: string,
+  heading: string,
+  lines: string[],
+): { content: string; fragment: FragmentRecord | null } {
+  const anchor = `${MEMORY_ANCHOR_PREFIX}${headingSlug(heading)}`;
+  const openRe = new RegExp(`<!-- plugin:${escapeRegExp(PLUGIN_NAME)}:${escapeRegExp(anchor)}:0:([0-9a-f]+) -->`);
+  // The plugin's earlier block for this heading is cut first, so the lines the
+  // section holds without it decide the union, and a changed block lands
+  // where a first compose would put it.
+  let text = content;
+  const mine = text.match(openRe);
+  let priorBlock: string | null = null;
+  if (mine) {
+    const close = `<!-- /plugin:${PLUGIN_NAME}:${anchor}:0:${mine[1]} -->`;
+    const end = text.indexOf(close, mine.index! + mine[0].length);
+    if (end !== -1) {
+      priorBlock = text.slice(mine.index!, end + close.length);
+      text = cutFragmentBlock(text, mine.index!, end + close.length);
+    }
+  }
+  const span = memorySectionSpan(text, heading);
+  const present = new Set<string>();
+  if (span) {
+    const blocks = sentinelBlocks(text, span.start, span.end);
+    let cursor = span.start;
+    const ownText: string[] = [];
+    for (const block of blocks) {
+      ownText.push(text.slice(cursor, block.start));
+      cursor = block.end;
+    }
+    ownText.push(text.slice(cursor, span.end));
+    for (const line of ownText.join("\n").split("\n")) {
+      const key = ruleLineKey(line);
+      if (key) present.add(key);
+    }
+  }
+  const wanted = lines.filter((line) => !present.has(ruleLineKey(line)));
+  if (wanted.length === 0) return { content: text, fragment: null };
+  const prose = span ? wanted.join("\n") : `## ${heading}\n\n${wanted.join("\n")}`;
+  const hash = hashProse(prose);
+  const block = `<!-- plugin:${PLUGIN_NAME}:${anchor}:0:${hash} -->\n${prose}\n<!-- /plugin:${PLUGIN_NAME}:${anchor}:0:${hash} -->`;
+  const fragment = { anchor, order: 0, hash };
+  if (priorBlock === block && mine) {
+    return { content, fragment };
+  }
+  if (!span) {
+    const body = text.replace(/\n*$/, "");
+    return { content: body ? `${body}\n\n${block}\n` : `${block}\n`, fragment };
+  }
+  // Among other plugins' blocks for this heading, by plugin name; else at the
+  // end of the section, after the section's own lines.
+  const peers = sentinelBlocks(text, span.start, span.end).filter((b) => b.anchor === anchor);
+  const after = peers.find((p) => p.plugin.localeCompare(PLUGIN_NAME) > 0);
+  if (after) {
+    return { content: text.slice(0, after.start) + block + "\n\n" + text.slice(after.start), fragment };
+  }
+  if (peers.length > 0) {
+    const lastEnd = Math.max(...peers.map((p) => p.end));
+    return { content: text.slice(0, lastEnd) + "\n\n" + block + text.slice(lastEnd), fragment };
+  }
+  const head = text.slice(0, span.end).replace(/\n*$/, "");
+  const tail = text.slice(span.end);
+  return { content: `${head}\n\n${block}\n${tail ? `\n${tail}` : ""}`, fragment };
+}
+
 // --- main compose ----------------------------------------------------------
 
 let changed = false;
+let memoryChanged = false;
 try {
   const pluginKeySafe = await installedSchemaAccepts("plugin", "probe-name");
   const pluginFilesManifestPath = join(
@@ -3023,6 +3217,50 @@ try {
     }
   }
 
+  // 2b. Merge the plugin's memory/ rules into the default space's memory files,
+  // recorded like fragments (sidecar key memory/<file>, anchor section:<slug>),
+  // so the stale loop below retires a heading the plugin no longer ships and
+  // doctor verifies the blocks. Gated like the contributions: a readable
+  // sidecar and an enabled plugin. Memory never recompiles the graph (the
+  // graph names the files, not their text).
+  const memoryRoot = join(PLUGIN_ROOT, "memory");
+  if (!contribManifestLoadError && pluginEnabledBySelection() && existsSync(memoryRoot)) {
+    for (const file of walk(memoryRoot)) {
+      const rel = relative(memoryRoot, file).replace(/\\/g, "/");
+      if (!MEMORY_FILES.includes(rel)) {
+        recordDrop(`memory file "memory/${rel}" is not one of the space's rule files (${MEMORY_FILES.join(", ")}); not merged`);
+        continue;
+      }
+      const sections = parsePluginMemory(projectPluginTokens(readFileSync(file, "utf-8"), HARNESS_LEAF));
+      if (sections.length === 0) continue;
+      const target = join(DEFAULT_MEMORY_DIR, rel);
+      const recordKey = `${MEMORY_RECORD_PREFIX}${rel}`;
+      let content: string;
+      if (existsSync(target)) {
+        content = readFileSync(target, "utf-8").replace(/\r\n/g, "\n");
+      } else if (existsSync(join(MEMORY_SEED_DIR, rel))) {
+        content = readFileSync(join(MEMORY_SEED_DIR, rel), "utf-8").replace(/\r\n/g, "\n");
+      } else {
+        recordDrop(`memory rules for ${rel} not merged: aidlc/spaces/default/memory/${rel} does not exist and the installed engine bundles no seed for it; run /aidlc once to create the space's memory, then compose again`, "advisory");
+        continue;
+      }
+      const before = content;
+      for (const section of sections) {
+        const merged = mergeMemorySection(content, section.heading, section.lines);
+        content = merged.content;
+        if (merged.fragment) {
+          recordFragment(recordKey, merged.fragment);
+          seenFragKeys.add(`${recordKey}:${PLUGIN_NAME}:${merged.fragment.anchor}:${merged.fragment.order}`);
+        }
+      }
+      if (content !== before || !existsSync(target)) {
+        mkdirSync(dirname(target), { recursive: true });
+        writeComposeFile(target, content);
+        memoryChanged = true;
+      }
+    }
+  }
+
   // Fragments this plugin recorded earlier but did not ship this run (moved to
   // another anchor, renumbered, or dropped) leave the stage and the record, so
   // a moved fragment appears once and doctor's composed-surface check agrees.
@@ -3036,10 +3274,27 @@ try {
         !seenFragKeys.has(`${target}:${PLUGIN_NAME}:${f.anchor}:${f.order}`));
       if (stale.length === 0) continue;
       // The sidecar is project data: a key that is not a plain stage or agent
-      // slug is not resolved to a path.
+      // slug, or a memory key in the list, is not resolved to a path.
       const plainSlug = /^[a-z0-9][a-z0-9-]*$/.test(target);
       const stageFile = plainSlug ? findStageFile(target) : null;
       const personaFile = plainSlug && !stageFile ? findAgentFile(target) : null;
+      const memoryFile = memoryFileOfRecord(target);
+      const memoryPath = memoryFile ? join(DEFAULT_MEMORY_DIR, memoryFile) : null;
+      if (memoryPath && existsSync(memoryPath)) {
+        let content = readFileSync(memoryPath, "utf-8").replace(/\r\n/g, "\n");
+        const before = content;
+        for (const f of stale) {
+          const open = `<!-- plugin:${PLUGIN_NAME}:${f.anchor}:${f.order}:${f.hash} -->`;
+          const close = `<!-- /plugin:${PLUGIN_NAME}:${f.anchor}:${f.order}:${f.hash} -->`;
+          const start = content.indexOf(open);
+          const end = start === -1 ? -1 : content.indexOf(close, start + open.length);
+          if (start !== -1 && end !== -1) content = cutFragmentBlock(content, start, end + close.length);
+        }
+        if (content !== before) {
+          writeComposeFile(memoryPath, content);
+          memoryChanged = true;
+        }
+      }
       if (personaFile) {
         // A persona and its native twins lose exactly the block compose added,
         // so each reads as a first compose of this version writes it.
@@ -3214,6 +3469,19 @@ try {
     }
   }
   commitComposeWrites();
+  // The copy the harness includes read (aidlc/active-memory/) follows the
+  // space's files, as at every session start; best effort, and only once the
+  // writes above are kept.
+  if (memoryChanged) {
+    try {
+      const includes = await import(join(HARNESS_DIR, "tools", "aidlc-includes.ts")) as {
+        refreshActiveMemory?: (projectDir: string) => string[];
+      };
+      includes.refreshActiveMemory?.(PROJECT_DIR);
+    } catch {
+      // The next session start writes it.
+    }
+  }
 } catch (e) {
   rollbackComposeWrites();
   recordDrop(`compose threw: ${e instanceof Error ? e.message : String(e)}`);

@@ -56,6 +56,28 @@ table and the resolver mechanics are the normative contract:
 [Rule System § Filename-derived scope](../reference/08-rule-system.md#filename-derived-scope)
 and [§ Layout](../reference/08-rule-system.md#layout).
 
+A plugin can add rules the same way. It ships the same files under its
+`memory/` directory, and compose merges each heading's lines into the default
+space's file under that heading, inside a block the plugin owns:
+
+```markdown
+## Testing Posture
+
+- **Methodology**: test-after
+<!-- plugin:acme:section:testing-posture:0:3f9a1c2e -->
+- Every Bolt's test report names the coverage it measured.
+<!-- /plugin:acme:section:testing-posture:0:3f9a1c2e -->
+```
+
+The lines outside the markers are yours and are never edited; the lines inside
+are the plugin's, replaced when the plugin changes them and removed when the
+plugin is turned off. Write your own rules outside the markers, and treat a
+plugin's block as upstream text: if you disagree with a rule in it, raise it
+with the plugin's owner rather than editing the block, which the next compose
+would put back. A line you already wrote under the heading is not repeated by
+the plugin. See
+[Authoring a Plugin § Method/rules](10-authoring-a-plugin.md#4-packaging-the-other-primitives).
+
 ### Holding Guard Policy for the whole repo
 
 One heading in these files is read as a structured setting rather than prose:
@@ -155,7 +177,9 @@ suffixes. Re-affirming an unchanged rule keeps its existing text and date.
 Two read-only `/aidlc --doctor` rows surface state after the fact: a
 **rule-drift**
 row flags headings where team or project content overlaps a populated org heading
-(a candidate contradiction for a human to verify), with lifecycle-stale files
+(a candidate contradiction for a human to verify), naming the plugin when the
+overlapping lines are a plugin's block (in a phase file only a plugin's block
+counts), with lifecycle-stale files
 reported separately as stale-suppressed, and a **paired-coverage** row reports how
 many rules name a sensor that actually resolves. Both are advisory and never
 change the exit code. See

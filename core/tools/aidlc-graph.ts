@@ -1059,6 +1059,10 @@ export interface RuleFile {
   // directly (single walking surface) instead of re-reading from `path`
   // (a relative DISPLAY path that would miss the AIDLC_RULES_DIR fixture).
   headings: Map<string, string>;
+  // `## <heading>` -> the plugins whose composed rule blocks populate it
+  // (`<!-- plugin:<name>:section:... -->`), so the doctor rule-drift row can
+  // name the plugin an overlap comes from. Empty for a file no plugin wrote in.
+  pluginHeadings: Map<string, Set<string>>;
 }
 
 // Filename anchors for the relocated method tree (aidlc/memory/). The layered
@@ -1143,6 +1147,48 @@ function parseRuleHeadings(raw: string): Map<string, string> {
   return out;
 }
 
+/** The plugins whose rule blocks sit under each `## heading`: a block's heading
+ *  is the `## ` line inside it when the plugin created the section, else the
+ *  nearest `## ` line above its open marker. Fenced code is skipped like
+ *  parseRuleHeadings does. */
+function pluginRuleHeadings(raw: string): Map<string, Set<string>> {
+  const out = new Map<string, Set<string>>();
+  const lines = raw.replace(/^\uFEFF/, "").replace(/\r\n/g, "\n").split("\n");
+  let current: string | null = null;
+  let inFence = false;
+  let open: { plugin: string; close: string; heading: string | null } | null = null;
+  const attribute = (plugin: string, heading: string | null): void => {
+    if (heading === null) return;
+    const plugins = out.get(heading) ?? new Set<string>();
+    plugins.add(plugin);
+    out.set(heading, plugins);
+  };
+  for (const line of lines) {
+    if (/^```/.test(line)) { inFence = !inFence; continue; }
+    if (inFence) continue;
+    if (/^## /.test(line)) {
+      current = line.slice(3).trim();
+      if (open && open.heading === null) open.heading = current;
+      continue;
+    }
+    const trimmed = line.trim();
+    if (open) {
+      if (trimmed === open.close) {
+        attribute(open.plugin, open.heading ?? current);
+        open = null;
+      } else if (open.heading === null && trimmed !== "") {
+        open.heading = current;
+      }
+      continue;
+    }
+    const marker = trimmed.match(/^<!-- plugin:([^:\s]+):(section:[^\s]+):(\d+):([0-9a-f]+) -->$/);
+    if (marker) {
+      open = { plugin: marker[1], close: `<!-- /plugin:${marker[1]}:${marker[2]}:${marker[3]}:${marker[4]} -->`, heading: null };
+    }
+  }
+  return out;
+}
+
 /** Walk the rules directory and return parsed + validated rule files in
  *  precedence order. Public — the future doctor rule-drift check imports
  *  this same walker (single walking surface, no parser duplication).
@@ -1204,6 +1250,7 @@ export function loadRules(): RuleFile[] {
       phase: c.phase,
       frontmatter: fm,
       headings,
+      pluginHeadings: pluginRuleHeadings(raw),
     });
   }
 
