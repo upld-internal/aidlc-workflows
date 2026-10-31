@@ -18,8 +18,8 @@
 // {{HARNESS_DIR}} substitution, no-clobber; (2) merge contributions
 // (produces/consumes/sensors set-union +
 // prose fragments spliced) into stage SOURCE — durable across recompiles, and
-// the plugin's memory/ rules into the default space's memory files, one
-// sentinel block per heading; (3) recompile the graph. Idempotent +
+// the plugin's memory/ rules into every space's memory files, one sentinel
+// block per heading; (3) recompile the graph. Idempotent +
 // short-circuits when nothing changed.
 
 import {
@@ -2253,7 +2253,7 @@ function spliceFragment(
 // --- memory rules ------------------------------------------------------------
 // A plugin's memory/ files carry rule lines under `## Heading`s, in the files
 // of a space's memory tree (the same names the engine seeds). Each heading
-// merges into the default space's file of that name as ONE sentinel block,
+// merges into every space's file of that name as ONE sentinel block,
 // `<!-- plugin:<name>:section:<heading-slug>:0:<hash> -->`: the prose
 // fragment's own marker shape, so the installed engine's readers (doctor's
 // composed-surface check, the disable-time strip, prune, the refresh strip)
@@ -2261,11 +2261,17 @@ function spliceFragment(
 // holds outside any plugin block is not repeated. The merge never edits a
 // line it did not write.
 
-const DEFAULT_MEMORY_DIR = join(PROJECT_DIR, "aidlc", "spaces", "default", "memory");
-// The engine's bundled seed of those files, copied out when a project's file
-// is still missing (what the first /aidlc does), so a plugin's rules land
-// before the person's first run as well as after it.
+const SPACES_DIR = join(PROJECT_DIR, "aidlc", "spaces");
+const DEFAULT_SPACE = "default";
+// The engine's bundled seed of those files, copied out when the default
+// space's file is still missing (what the first /aidlc does), so a plugin's
+// rules land before the person's first run as well as after it. Another space
+// gets its files from `space create`, so there only a file that exists is
+// merged into.
 const MEMORY_SEED_DIR = join(HARNESS_DIR, "tools", "data", "memory-seed");
+// A space name as `space create` gives one (SPACE_NAME_REGEX in the engine's
+// aidlc-runtime-paths.ts; this file cannot import it).
+const SPACE_NAME_RE = /^[a-z][a-z0-9-]*$/;
 const MEMORY_FILES = [
   "org.md",
   "team.md",
@@ -2278,11 +2284,48 @@ const MEMORY_FILES = [
 const MEMORY_RECORD_PREFIX = "memory/";
 const MEMORY_ANCHOR_PREFIX = "section:";
 
-// A sidecar key's memory file, through the list only: a key is project data.
-function memoryFileOfRecord(key: string): string | null {
+// The spaces whose memory the rules merge into: the default space first, then
+// every other folder under aidlc/spaces/ with a space's name, sorted.
+function memorySpaces(): string[] {
+  const spaces = [DEFAULT_SPACE];
+  if (!existsSync(SPACES_DIR)) return spaces;
+  for (const name of readdirSync(SPACES_DIR).sort()) {
+    if (name === DEFAULT_SPACE || !SPACE_NAME_RE.test(name)) continue;
+    try {
+      if (lstatSync(join(SPACES_DIR, name)).isDirectory()) spaces.push(name);
+    } catch {
+      // Gone between the listing and the stat.
+    }
+  }
+  return spaces;
+}
+
+function spaceMemoryDir(space: string): string {
+  return join(SPACES_DIR, space, "memory");
+}
+
+// The sidecar key of a space's memory file: `memory/<file>` for the default
+// space (the key the first memory-merging release wrote, so a composed
+// project needs no migration), `memory/<space>/<file>` for any other. The
+// engine's `pluginMemoryRecordKey` (aidlc-plugin-validate.ts) is the same
+// rule; the two stay the same by hand.
+function memoryRecordKey(space: string, rel: string): string {
+  return space === DEFAULT_SPACE ? `${MEMORY_RECORD_PREFIX}${rel}` : `${MEMORY_RECORD_PREFIX}${space}/${rel}`;
+}
+
+// A sidecar key's space and memory file, through the file list and the
+// space-name grammar only: a key is project data. The engine's
+// `pluginMemoryTargetOfRecord` is the same rule.
+function memoryTargetOfRecord(key: string): { space: string; rel: string } | null {
   if (!key.startsWith(MEMORY_RECORD_PREFIX)) return null;
-  const rel = key.slice(MEMORY_RECORD_PREFIX.length);
-  return MEMORY_FILES.includes(rel) ? rel : null;
+  const rest = key.slice(MEMORY_RECORD_PREFIX.length);
+  if (MEMORY_FILES.includes(rest)) return { space: DEFAULT_SPACE, rel: rest };
+  const slash = rest.indexOf("/");
+  if (slash === -1) return null;
+  const space = rest.slice(0, slash);
+  const rel = rest.slice(slash + 1);
+  if (space === DEFAULT_SPACE || !SPACE_NAME_RE.test(space) || !MEMORY_FILES.includes(rel)) return null;
+  return { space, rel };
 }
 
 function headingSlug(heading: string): string {
@@ -3217,14 +3260,27 @@ try {
     }
   }
 
-  // 2b. Merge the plugin's memory/ rules into the default space's memory files,
-  // recorded like fragments (sidecar key memory/<file>, anchor section:<slug>),
-  // so the stale loop below retires a heading the plugin no longer ships and
-  // doctor verifies the blocks. Gated like the contributions: a readable
-  // sidecar and an enabled plugin. Memory never recompiles the graph (the
-  // graph names the files, not their text).
+  // 2b. Merge the plugin's memory/ rules into every space's memory files,
+  // recorded like fragments (sidecar key memory/<file> for the default space,
+  // memory/<space>/<file> for another; anchor section:<slug>), so the stale
+  // loop below retires a heading the plugin no longer ships and doctor
+  // verifies the blocks. Gated like the contributions: a readable sidecar and
+  // an enabled plugin. Memory never recompiles the graph (the graph names the
+  // files, not their text). The default space's missing file comes from the
+  // engine's seed; another space's file is merged into only where it exists.
+  // Every block this run leaves in a file is noted, so the sweep after the
+  // merge can retire the plugin's other blocks there (a heading it no longer
+  // ships, or a block `space create` copied from the default space).
   const memoryRoot = join(PLUGIN_ROOT, "memory");
-  if (!contribManifestLoadError && pluginEnabledBySelection() && existsSync(memoryRoot)) {
+  const memoryBlocksKept = new Map<string, Set<string>>();
+  const keepMemoryBlock = (path: string, anchor: string): void => {
+    const kept = memoryBlocksKept.get(path) ?? new Set<string>();
+    kept.add(anchor);
+    memoryBlocksKept.set(path, kept);
+  };
+  const memoryMergeOn = !contribManifestLoadError && pluginEnabledBySelection();
+  if (memoryMergeOn && existsSync(memoryRoot)) {
+    const spaces = memorySpaces();
     for (const file of walk(memoryRoot)) {
       const rel = relative(memoryRoot, file).replace(/\\/g, "/");
       if (!MEMORY_FILES.includes(rel)) {
@@ -3233,30 +3289,59 @@ try {
       }
       const sections = parsePluginMemory(projectPluginTokens(readFileSync(file, "utf-8"), HARNESS_LEAF));
       if (sections.length === 0) continue;
-      const target = join(DEFAULT_MEMORY_DIR, rel);
-      const recordKey = `${MEMORY_RECORD_PREFIX}${rel}`;
-      let content: string;
-      if (existsSync(target)) {
-        content = readFileSync(target, "utf-8").replace(/\r\n/g, "\n");
-      } else if (existsSync(join(MEMORY_SEED_DIR, rel))) {
-        content = readFileSync(join(MEMORY_SEED_DIR, rel), "utf-8").replace(/\r\n/g, "\n");
-      } else {
-        recordDrop(`memory rules for ${rel} not merged: aidlc/spaces/default/memory/${rel} does not exist and the installed engine bundles no seed for it; run /aidlc once to create the space's memory, then compose again`, "advisory");
-        continue;
-      }
-      const before = content;
-      for (const section of sections) {
-        const merged = mergeMemorySection(content, section.heading, section.lines);
-        content = merged.content;
-        if (merged.fragment) {
-          recordFragment(recordKey, merged.fragment);
-          seenFragKeys.add(`${recordKey}:${PLUGIN_NAME}:${merged.fragment.anchor}:${merged.fragment.order}`);
+      for (const space of spaces) {
+        const target = join(spaceMemoryDir(space), rel);
+        const recordKey = memoryRecordKey(space, rel);
+        let content: string;
+        if (existsSync(target)) {
+          content = readFileSync(target, "utf-8").replace(/\r\n/g, "\n");
+        } else if (space !== DEFAULT_SPACE) {
+          continue;
+        } else if (existsSync(join(MEMORY_SEED_DIR, rel))) {
+          content = readFileSync(join(MEMORY_SEED_DIR, rel), "utf-8").replace(/\r\n/g, "\n");
+        } else {
+          recordDrop(`memory rules for ${rel} not merged: aidlc/spaces/default/memory/${rel} does not exist and the installed engine bundles no seed for it; run /aidlc once to create the space's memory, then compose again`, "advisory");
+          continue;
+        }
+        const before = content;
+        for (const section of sections) {
+          const merged = mergeMemorySection(content, section.heading, section.lines);
+          content = merged.content;
+          if (merged.fragment) {
+            recordFragment(recordKey, merged.fragment);
+            seenFragKeys.add(`${recordKey}:${PLUGIN_NAME}:${merged.fragment.anchor}:${merged.fragment.order}`);
+            keepMemoryBlock(target, merged.fragment.anchor);
+          }
+        }
+        if (content !== before || !existsSync(target)) {
+          mkdirSync(dirname(target), { recursive: true });
+          writeComposeFile(target, content);
+          memoryChanged = true;
         }
       }
-      if (content !== before || !existsSync(target)) {
-        mkdirSync(dirname(target), { recursive: true });
-        writeComposeFile(target, content);
-        memoryChanged = true;
+    }
+  }
+
+  // Every other block of this plugin in a space's memory file goes: a heading
+  // it no longer ships, a file it no longer ships, or a block `space create`
+  // copied from the default space into a new one. The marker names the
+  // plugin, so no record is needed; the record loop below drops the records.
+  if (memoryMergeOn) {
+    for (const space of memorySpaces()) {
+      for (const rel of MEMORY_FILES) {
+        const path = join(spaceMemoryDir(space), rel);
+        if (!existsSync(path)) continue;
+        const kept = memoryBlocksKept.get(path) ?? new Set<string>();
+        let content = readFileSync(path, "utf-8").replace(/\r\n/g, "\n");
+        const before = content;
+        for (const block of sentinelBlocks(content, 0, content.length).reverse()) {
+          if (block.plugin !== PLUGIN_NAME || kept.has(block.anchor)) continue;
+          content = cutFragmentBlock(content, block.start, block.end);
+        }
+        if (content !== before) {
+          writeComposeFile(path, content);
+          memoryChanged = true;
+        }
       }
     }
   }
@@ -3274,12 +3359,13 @@ try {
         !seenFragKeys.has(`${target}:${PLUGIN_NAME}:${f.anchor}:${f.order}`));
       if (stale.length === 0) continue;
       // The sidecar is project data: a key that is not a plain stage or agent
-      // slug, or a memory key in the list, is not resolved to a path.
+      // slug, or a memory key naming a listed file in a named space, is not
+      // resolved to a path.
       const plainSlug = /^[a-z0-9][a-z0-9-]*$/.test(target);
       const stageFile = plainSlug ? findStageFile(target) : null;
       const personaFile = plainSlug && !stageFile ? findAgentFile(target) : null;
-      const memoryFile = memoryFileOfRecord(target);
-      const memoryPath = memoryFile ? join(DEFAULT_MEMORY_DIR, memoryFile) : null;
+      const memoryTarget = memoryTargetOfRecord(target);
+      const memoryPath = memoryTarget ? join(spaceMemoryDir(memoryTarget.space), memoryTarget.rel) : null;
       if (memoryPath && existsSync(memoryPath)) {
         let content = readFileSync(memoryPath, "utf-8").replace(/\r\n/g, "\n");
         const before = content;

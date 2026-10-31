@@ -44,6 +44,7 @@ import {
   runtimeHarnessDir,
   runtimeHarnessName,
   runtimeProjectDir,
+  SPACE_NAME_REGEX,
 } from "./aidlc-runtime-paths.ts";
 import {
   executePlan,
@@ -56,13 +57,16 @@ import {
 } from "./aidlc-transaction.ts";
 import {
   hostIdSegment,
+  PLUGIN_MEMORY_DEFAULT_SPACE,
   PLUGIN_MEMORY_FILES,
   pluginMemoryRecordKey,
+  pluginMemoryTargetOfRecord,
   pluginStageSlugs,
   readPluginBase,
   scopeIncludes,
   type PluginBaseProblem,
   type PluginDependency,
+  type PluginMemoryFile,
 } from "./aidlc-plugin-validate.ts";
 
 const SAFE_PLUGIN_KEY = /^[a-z][a-z0-9-]*$/;
@@ -1502,30 +1506,54 @@ export interface ContributionSource {
   twins?: Array<{ path: string; rel: string; content: string | null; toml: boolean }>;
 }
 
-// The default space's memory tree, where compose merges a plugin's memory/
-// rules: the seed every project starts from. Other spaces take their files
-// from it at `space create`, blocks included.
-export function defaultSpaceMemoryDir(projectDir: string): string {
-  return join(projectDir, "aidlc", "spaces", "default", "memory");
+// Every space whose memory a plugin's memory/ rules merge into: the default
+// space first (the seed every project starts from, created by compose when it
+// is missing), then each other space under aidlc/spaces/ whose name is one
+// `space create` could have given, sorted. A space is a folder; a file or a
+// link under spaces/ is not one.
+export function pluginMemorySpaces(projectDir: string): string[] {
+  const spaces = new Set<string>([PLUGIN_MEMORY_DEFAULT_SPACE]);
+  const root = join(projectDir, "aidlc", "spaces");
+  try {
+    for (const name of readdirSync(root).sort()) {
+      if (name === PLUGIN_MEMORY_DEFAULT_SPACE || !SPACE_NAME_REGEX.test(name)) continue;
+      try {
+        if (lstatSync(join(root, name)).isDirectory()) spaces.add(name);
+      } catch {
+        // Gone between the listing and the stat: not a space to merge into.
+      }
+    }
+  } catch {
+    // No spaces folder yet: the default space alone.
+  }
+  return [...spaces];
 }
 
-// The memory files compose may have merged into, by their sidecar key, read as
-// compose wrote them. A file that is not there has no record to check.
+// One space's memory tree, where compose merges a plugin's memory/ rules.
+export function spaceMemoryDir(projectDir: string, space: string): string {
+  return join(projectDir, "aidlc", "spaces", space, "memory");
+}
+
+// The memory files compose may have merged into, in every space, by their
+// sidecar key, read as compose wrote them. A file that is not there has no
+// record to check.
 export function memoryContributionSources(projectDir: string): Map<string, ContributionSource> {
   const sources = new Map<string, ContributionSource>();
-  const memoryDir = defaultSpaceMemoryDir(projectDir);
-  for (const rel of PLUGIN_MEMORY_FILES) {
-    const path = join(memoryDir, ...rel.split("/"));
-    try {
-      if (!lstatSync(path).isFile()) continue;
-      sources.set(pluginMemoryRecordKey(rel), {
-        path,
-        content: readFileSync(path, "utf-8").replace(/\r\n/g, "\n"),
-        parsed: {},
-        kind: "memory",
-      });
-    } catch {
-      // Absent, or unreadable: doctor's workspace rows say so.
+  for (const space of pluginMemorySpaces(projectDir)) {
+    const memoryDir = spaceMemoryDir(projectDir, space);
+    for (const rel of PLUGIN_MEMORY_FILES) {
+      const path = join(memoryDir, ...rel.split("/"));
+      try {
+        if (!lstatSync(path).isFile()) continue;
+        sources.set(pluginMemoryRecordKey(rel, space), {
+          path,
+          content: readFileSync(path, "utf-8").replace(/\r\n/g, "\n"),
+          parsed: {},
+          kind: "memory",
+        });
+      } catch {
+        // Absent, or unreadable: doctor's workspace rows say so.
+      }
     }
   }
   return sources;
@@ -1836,8 +1864,8 @@ function pruneContributions(stagedProject: string, harnessDir: string, key: stri
       if (after !== before) writeFileSync(twin, after);
     }
   }
-  // The default space's memory files carry the plugin's rule blocks, marked
-  // like fragments; the team's own lines around them stay.
+  // Every space's memory files carry the plugin's rule blocks, marked like
+  // fragments; the team's own lines around them stay.
   for (const source of memoryContributionSources(stagedProject).values()) {
     const before = readFileSync(source.path, "utf-8");
     const after = withFileLineEndings(before, (text) => removeFragments(text, key, source.path));
@@ -2069,6 +2097,43 @@ function recordedAdditionGone(projectDir: string, harnessDir: string, key: strin
   });
 }
 
+// Whether a space other than the default holds one of the plugin's shipped
+// memory files and the sidecar records no block of the plugin in that space:
+// compose has not reached it (a space created after the last compose). The
+// default space is composed first on every run, so it needs no such check;
+// a space whose files already hold every shipped line by hand gets no record
+// and reads as unreached, which costs a re-compose that changes nothing. A
+// sidecar that does not read is left to the gap check.
+function memorySpaceUnrecorded(projectDir: string, harnessDir: string, plugin: InstalledPlugin): boolean {
+  const shipped = regularFiles(join(plugin.root, "memory"))
+    .map((path) => relative(join(plugin.root, "memory"), path).split(sep).join("/"))
+    .filter((rel): rel is PluginMemoryFile => (PLUGIN_MEMORY_FILES as readonly string[]).includes(rel));
+  if (shipped.length === 0) return false;
+  const sidecar = join(harnessDataDir(projectDir, harnessDir), `plugin-contrib-${plugin.key}.json`);
+  let records: unknown;
+  try {
+    records = readJson(sidecar);
+  } catch {
+    return false;
+  }
+  if (!isPlainObject(records)) return false;
+  const recorded = new Set<string>();
+  for (const key of Object.keys(records)) {
+    const target = pluginMemoryTargetOfRecord(key);
+    if (target) recorded.add(target.space);
+  }
+  return pluginMemorySpaces(projectDir).some((space) =>
+    space !== PLUGIN_MEMORY_DEFAULT_SPACE &&
+    !recorded.has(space) &&
+    shipped.some((rel) => {
+      try {
+        return lstatSync(join(spaceMemoryDir(projectDir, space), ...rel.split("/"))).isFile();
+      } catch {
+        return false;
+      }
+    }));
+}
+
 function compositionIsCurrent(
   plugin: InstalledPlugin,
   evidence: ProjectEvidence,
@@ -2093,6 +2158,11 @@ function compositionIsCurrent(
     !existsSync(join(harnessDataDir(projectDir, harnessDir), `plugin-contrib-${plugin.key}.json`))
   ) return false;
   if ((selection === null || selection.has(plugin.key)) && recordedAdditionGone(projectDir, harnessDir, plugin.key)) {
+    return false;
+  }
+  // A space made since the last compose holds the plugin's files with no
+  // record of its blocks, so the next sync composes into it.
+  if ((selection === null || selection.has(plugin.key)) && memorySpaceUnrecorded(projectDir, harnessDir, plugin)) {
     return false;
   }
   const ownership = evidence.ownership.get(plugin.key);

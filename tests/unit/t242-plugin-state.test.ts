@@ -30,6 +30,7 @@ import {
   fragmentProseHash,
   contributionSources,
   memoryContributionSources,
+  pluginMemorySpaces,
   main as pluginMain,
   normalizeInstalledPlugin,
   pluginSourceHash,
@@ -45,6 +46,7 @@ import {
   type StageContribRecord,
 } from "../../core/tools/aidlc-plugin.ts";
 import { committedTextBytes } from "../../core/tools/aidlc-lib.ts";
+import { pluginMemoryRecordKey, pluginMemoryTargetOfRecord } from "../../core/tools/aidlc-plugin-validate.ts";
 import { aidlcInvocation } from "../../core/tools/aidlc-runtime-paths.ts";
 
 setDefaultTimeout(NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
@@ -672,7 +674,7 @@ describe("t242 pure status comparator", () => {
 // The default space's memory files are contribution sources too, by their
 // sidecar key, so doctor and sync read a plugin's rule blocks like fragments.
 describe("t242 memory contribution sources", () => {
-  test("the default space's rule files are keyed memory/<file>, read as LF, and nothing else is", () => {
+  test("every space's rule files are keyed by space and file, read as LF, and nothing else is", () => {
     const projectDir = mkdtempSync(join(tmpdir(), "aidlc-t242-memory-"));
     try {
       const memoryDir = join(projectDir, "aidlc", "spaces", "default", "memory");
@@ -681,12 +683,33 @@ describe("t242 memory contribution sources", () => {
       writeFileSync(join(memoryDir, "phases", "construction.md"), "## Testing Standards\n\n- b\n");
       writeFileSync(join(memoryDir, "team-overrides.md"), "## Not read\n");
       writeFileSync(join(memoryDir, "phases", "initialization.md"), "## Not read\n");
+      // Another space: its files key by its name. A folder outside the space
+      // grammar, a plain file under spaces/, and a link to a space are not spaces.
+      const engineering = join(projectDir, "aidlc", "spaces", "engineering", "memory");
+      mkdirSync(join(engineering, "phases"), { recursive: true });
+      writeFileSync(join(engineering, "org.md"), "## Testing Posture\n\n- c\n");
+      writeFileSync(join(engineering, "phases", "construction.md"), "## Testing Standards\n\n- d\n");
+      mkdirSync(join(projectDir, "aidlc", "spaces", "Not_A_Space", "memory"), { recursive: true });
+      writeFileSync(join(projectDir, "aidlc", "spaces", "Not_A_Space", "memory", "org.md"), "## Not read\n");
+      writeFileSync(join(projectDir, "aidlc", "spaces", "stray.md"), "## Not read\n");
+      symlinkSync(join(projectDir, "aidlc", "spaces", "engineering"), join(projectDir, "aidlc", "spaces", "linked"));
+      expect(pluginMemorySpaces(projectDir)).toEqual(["default", "engineering"]);
       const sources = memoryContributionSources(projectDir);
-      expect([...sources.keys()].sort()).toEqual(["memory/org.md", "memory/phases/construction.md"]);
+      expect([...sources.keys()].sort()).toEqual([
+        "memory/engineering/org.md",
+        "memory/engineering/phases/construction.md",
+        "memory/org.md",
+        "memory/phases/construction.md",
+      ]);
       expect(sources.get("memory/org.md")).toMatchObject({
         kind: "memory",
         content: "# Org\n\n## Testing Posture\n\n- a\n",
         parsed: {},
+      });
+      expect(sources.get("memory/engineering/org.md")).toMatchObject({
+        kind: "memory",
+        path: join(engineering, "org.md"),
+        content: "## Testing Posture\n\n- c\n",
       });
       const all = contributionSources(
         join(projectDir, ".claude", "aidlc-common", "stages"),
@@ -696,6 +719,7 @@ describe("t242 memory contribution sources", () => {
         ".claude",
       );
       expect(all.get("memory/phases/construction.md")?.kind).toBe("memory");
+      expect(all.get("memory/engineering/phases/construction.md")?.kind).toBe("memory");
       const block = fragmentProseHash("- b");
       expect(recordedContributionGaps({}, `## Testing Standards\n\n<!-- plugin:acme:section:testing-standards:0:${block} -->\n- b\n<!-- /plugin:acme:section:testing-standards:0:${block} -->\n`, "acme", {
         fragments: [{ anchor: "section:testing-standards", order: 0, hash: block }],
@@ -705,6 +729,33 @@ describe("t242 memory contribution sources", () => {
       })).toEqual({ missing: [`fragments=[section:testing-standards@0:${block}]`], gone: true });
     } finally {
       rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+
+  test("a memory record key names the default space short and any other space by name, and resolves only through the list", () => {
+    expect(pluginMemoryRecordKey("org.md")).toBe("memory/org.md");
+    expect(pluginMemoryRecordKey("phases/construction.md", "default")).toBe("memory/phases/construction.md");
+    expect(pluginMemoryRecordKey("phases/construction.md", "engineering")).toBe("memory/engineering/phases/construction.md");
+    expect(pluginMemoryTargetOfRecord("memory/org.md")).toEqual({ space: "default", file: "org.md" });
+    expect(pluginMemoryTargetOfRecord("memory/phases/construction.md")).toEqual({ space: "default", file: "phases/construction.md" });
+    expect(pluginMemoryTargetOfRecord("memory/engineering/org.md")).toEqual({ space: "engineering", file: "org.md" });
+    expect(pluginMemoryTargetOfRecord("memory/engineering/phases/construction.md")).toEqual({ space: "engineering", file: "phases/construction.md" });
+    // A `phases` space cannot be mistaken for the default space's phase files.
+    expect(pluginMemoryTargetOfRecord("memory/phases/phases/construction.md")).toEqual({ space: "phases", file: "phases/construction.md" });
+    for (const key of [
+      "build-and-test",                        // a stage slug
+      "memory/default/org.md",                 // the default space has the short form only
+      "memory/engineering/stray.md",           // not a listed file
+      "memory/engineering/phases/initialization.md",
+      "memory/Not_A_Space/org.md",             // outside the space grammar
+      "memory/../org.md",
+      "memory/eng/../org.md",
+      "memory/engineering/../org.md",
+      "memory/engineering//org.md",
+      "memory/",
+      "memory",
+    ]) {
+      expect(pluginMemoryTargetOfRecord(key), key).toBeNull();
     }
   });
 });

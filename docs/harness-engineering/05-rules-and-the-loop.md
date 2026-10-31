@@ -57,7 +57,7 @@ table and the resolver mechanics are the normative contract:
 and [§ Layout](../reference/08-rule-system.md#layout).
 
 A plugin can add rules the same way. It ships the same files under its
-`memory/` directory, and compose merges each heading's lines into the default
+`memory/` directory, and compose merges each heading's lines into every
 space's file under that heading, inside a block the plugin owns:
 
 ```markdown

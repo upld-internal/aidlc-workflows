@@ -397,7 +397,9 @@ A newly created space starts with a copy of the default space's
 framework's own phase rules, and fresh, empty `team.md` / `project.md` practice
 files — a new team earns its own practices rather than inheriting another team's.
 Its `knowledge/` and `codekb/` start empty too. The copy is made once: later
-changes to the default space's `org.md` do not reach the new space.
+changes to the default space's `org.md` do not reach the new space. The one
+exception is a plugin's rule blocks: a plugin keeps its rules current in every
+space's memory files, so the new space gets them as the plugin ships them.
 [What carries over, and what doesn't](#what-carries-over-and-what-doesnt) lists
 what is shared and what is not.
 
@@ -606,7 +608,7 @@ and machines.
 
 | What | Between intents in a space | Between spaces | Between projects (separate `aidlc/` folders) |
 |---|---|---|---|
-| Rules: `org.md`, `team.md`, `project.md`, `phases/` | Shared. Each stage reads the current files | A new space gets a one-time copy of the default space's `org.md` and the framework's phase rules; its `team.md` and `project.md` start empty. After that, nothing flows | Copy the files, or start from a template repo (below) |
+| Rules: `org.md`, `team.md`, `project.md`, `phases/` | Shared. Each stage reads the current files | A new space gets a one-time copy of the default space's `org.md` and the framework's phase rules; its `team.md` and `project.md` start empty. After that, nothing of the team's flows; a plugin's rule blocks are kept current in every space | Copy the files, or start from a template repo (below) |
 | Learnings you keep | Land in the active space's `project.md`, or `team.md` when you promote them | Not shared. Each space has its own | Copy the lines you want |
 | Your documents (`knowledge/`) | Shared. `associate` adds an intent to a document's list and can be repeated; a document with no intent is space-wide | Not shared. Each space has its own folder | `onboard` copies a file in and refuses a path outside the project, so copy the file into the other project |
 | Code knowledge (`codekb/`) | Shared, per repo. A current scan can be reused by your choice | Not shared. Another space scans again | Each project scans its own. A teammate's clone of the same repo can reuse a scan |

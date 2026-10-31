@@ -102,7 +102,7 @@ path without attributing it to the plugin currently composing.
 primitive subtree.
 
 `memory` is the plugin's rule files (`memory/{org,team,project}.md`,
-`memory/phases/<phase>.md`), merged into the default space's memory under the
+`memory/phases/<phase>.md`), merged into every space's memory under the
 same `## Heading`s rather than copied; see §4, Method/rules.
 
 Ship only the keys your plugin uses. `test-pro` ships a support agent, a plugin
@@ -353,7 +353,7 @@ strips them before it re-composes.
 ## 4. Packaging the other primitives
 
 `test-pro` ships stages, contributions, sensors, a support agent, a scope, and
-methodology knowledge, and two rules for the default space's memory (one in
+methodology knowledge, and two rules for every space's memory (one in
 `org.md`, one in `phases/construction.md`).
 
 - **Agents.** Drop `agents/<plugin>-<role>-agent.md` with `plugin:` set. The
@@ -412,8 +412,8 @@ methodology knowledge, and two rules for the default space's memory (one in
   - A production deploy is tagged before it ships.
   ```
 
-  Compose merges each heading's lines into `aidlc/spaces/default/memory/<file>`
-  under the same heading, inside one block your plugin owns
+  Compose merges each heading's lines into `aidlc/spaces/<space>/memory/<file>`,
+  in every space, under the same heading, inside one block your plugin owns
   (`<!-- plugin:acme:section:testing-posture:0:<hash> -->` … `<!-- /plugin:… -->`),
   at the end of the section; a heading the file lacks is created inside the
   block. A line the section already holds outside any plugin block is not
@@ -425,10 +425,14 @@ methodology knowledge, and two rules for the default space's memory (one in
   these files alone. Pick the layer the way the team would: `org.md` is the
   baseline every project inherits (doctor's rule-drift row then measures team
   and project rules against yours), while `team.md` is itself measured against
-  the framework's `org.md` defaults; either way an overlap names your plugin.
-  Your rules reach the **default space only**: a project that works in another
-  space (`aidlc/spaces/<name>/memory/`) does not get them there, and a space
-  created later holds at most a frozen copy of your `org.md` block.
+  the framework's `org.md` defaults; either way an overlap names your plugin,
+  in every space. Your rules reach **every space**: the default space first
+  (a file it lacks is seeded first), then each other space under
+  `aidlc/spaces/<name>/memory/` where the file exists. A space created later
+  starts with the default space's `org.md`, your block included, and the next
+  compose (a session start, or `aidlc engine plugin sync`) brings it fully up
+  to date: your current org, team, project and phase rules, recorded for that
+  space, and nothing you no longer ship.
   Do **not** ship a `rules/` dir — that path is no longer read (the rule layer
   moved into per-space memory). See [Rules and the Loop](05-rules-and-the-loop.md).
 - **Knowledge.** Ship per-agent **methodology** knowledge under
