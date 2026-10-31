@@ -1190,13 +1190,20 @@ function pluginRuleHeadings(raw: string): Map<string, Set<string>> {
 }
 
 /** Walk the rules directory and return parsed + validated rule files in
- *  precedence order. Public — the future doctor rule-drift check imports
- *  this same walker (single walking surface, no parser duplication).
+ *  precedence order. Public — the doctor rule-drift check imports this same
+ *  walker (single walking surface, no parser duplication). With no `space`,
+ *  or the default space, the directory is rulesDir() (the AIDLC_RULES_DIR
+ *  seam included); another space's name reads that space's memory under the
+ *  project dir, with display paths under it, so doctor can walk every space
+ *  with the one parser.
  *  Tolerates a missing rules dir (returns []) so the zero-rules edge
  *  case stays clean. */
-export function loadRules(): RuleFile[] {
-  const dir = rulesDir();
+export function loadRules(space?: string): RuleFile[] {
+  const ownSpace = space !== undefined && space !== MEMORY_SPACE;
+  const dir = ownSpace ? join(runtimeProjectDir(), ...memorySegmentsForSpace(space)) : rulesDir();
   if (!existsSync(dir)) return [];
+  const displayPath = (rel: string): string =>
+    ownSpace ? toPosix(join(...memorySegmentsForSpace(space), rel)) : memoryDisplayPath(rel);
 
   // Each candidate: the absolute on-disk path to read, the display sub-path
   // (relative to aidlc/memory/, e.g. "org.md" or "phases/construction.md")
@@ -1245,7 +1252,7 @@ export function loadRules(): RuleFile[] {
     const headings = parseRuleHeadings(raw);
 
     matched.push({
-      path: memoryDisplayPath(c.rel),
+      path: displayPath(c.rel),
       scope: c.scope,
       phase: c.phase,
       frontmatter: fm,

@@ -20,10 +20,10 @@ test coverage** rather than the baseline unit/integration tests core ships. It:
   coverage-threshold and requirement-coverage gaps; and
 - **ships a read-only doctor check** that verifies its composed sensors, scope,
   and support agent are installed; and
-- **adds two rules to the default space's memory** (one under `## Testing
+- **adds two rules to every space's memory** (one under `## Testing
   Posture` in `org.md`, one under `## Testing Standards` in
   `phases/construction.md`), each in a block the plugin owns, so every stage
-  reads them with the team's own rules.
+  in every space reads them with the team's own rules.
 
 It reuses the framework's `aidlc-quality-agent` as the test lead and ships
 `test-pro-metrics-agent` as a support persona.

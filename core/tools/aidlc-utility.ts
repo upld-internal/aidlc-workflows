@@ -116,6 +116,7 @@ import {
   selectionDroppedOrderingEdges,
   stageGraphDrift,
   type GraphStage,
+  type RuleFile,
   takeComposerScores,
   validateGrid,
   validateScope,
@@ -1278,8 +1279,8 @@ function stripDisabledPluginContributions(
         }
       }
     }
-    // The plugin's rule blocks in the default space's memory files carry the
-    // same markers; the lines around them are the team's and stay.
+    // The plugin's rule blocks in every space's memory files carry the same
+    // markers; the lines around them are the team's and stay.
     for (const source of memoryContributionSources(runtimeProjectDir()).values()) {
       const before = readFileSync(source.path, "utf-8");
       const content = withFileLineEndings(before, (text) => removePluginFragments(text, plugin));
@@ -6979,10 +6980,12 @@ export async function collectDoctorReport(
 
   // Rule drift (advisory, always pass:true) — surface team/project rule files
   // whose `##` headings overlap a POPULATED heading in the org layer
-  // (aidlc/spaces/default/memory/org.md), quoting the org sentence inline so
+  // (aidlc/spaces/<space>/memory/org.md), quoting the org sentence inline so
   // the orchestrator-LLM can review for contradiction at observation time. A
   // learning is a practice (vision §6) — it lands in team.md / project.md, so
-  // those two scopes are the whole team/project surface the walk reads.
+  // those two scopes are the whole team/project surface the walk reads. Every
+  // space is read, each against its own org.md: a plugin's blocks reach every
+  // space's files, and a space's stages read that space's org layer.
   //
   // Three-concerns seam (T2): doctor is a deterministic tool — it detects
   // same-heading structural overlap (byte-reproducible), NOT semantic
@@ -6991,7 +6994,9 @@ export async function collectDoctorReport(
   //
   // Read seam: heading bodies come from loadRules().headings (surfaced from
   // the same `raw` loadRules reads under rulesDir(), honouring
-  // AIDLC_RULES_DIR), never a second read from the relative .path.
+  // AIDLC_RULES_DIR), never a second read from the relative .path. The other
+  // spaces are read through the same walker by name; under the AIDLC_RULES_DIR
+  // fixture seam there is one tree, so only it is read.
   try {
     const rules = loadRules();
     const org = rules.find(
@@ -7003,42 +7008,53 @@ export async function collectDoctorReport(
         label: "Rule drift: org rules absent (informational)",
       });
     } else {
-      // Populated org headings only — multi-line-comment-only headings
-      // (e.g. ## Corrections) read as empty and are excluded.
-      const orgPopulated = new Map<string, string>();
-      for (const [h, text] of org.headings) {
-        if (text.trim() !== "") orgPopulated.set(h, text);
-      }
       type Overlap = { file: string; heading: string; orgSentence: string; plugins: string[] };
       const drifts: Overlap[] = [];
       const staleSuppressed: Overlap[] = [];
       const today = new Date().toISOString().slice(0, 10);
-      // A plugin's composed rule block (plugin memory/ files) populates a
-      // heading like a team line does, and the overlap names the plugin so
-      // the reviewer knows whose rule to weigh. In a phase file only a
-      // plugin's block is read: the phase layer is the framework's own text
-      // otherwise, and never a team practice.
-      for (const rule of rules) {
-        if (rule.scope !== "team" && rule.scope !== "project" && rule.scope !== "phase") continue;
-        const stale = isRuleStale(rule.frontmatter, today);
-        for (const [h, text] of rule.headings) {
-          if (text.trim() === "") continue;
-          const orgText = orgPopulated.get(h);
-          if (orgText === undefined) continue;
-          const plugins = [...(rule.pluginHeadings.get(h) ?? [])].sort();
-          if (rule.scope === "phase" && plugins.length === 0) continue;
-          // First sentence of the org body under that heading, quoted
-          // verbatim. Split on the first sentence terminator; fall back to
-          // the whole first non-empty line when none is present.
-          const firstLine = orgText.split("\n")[0] ?? orgText;
-          const sentenceMatch = firstLine.match(/^.*?[.!?](?=\s|$)/);
-          const orgSentence = (sentenceMatch ? sentenceMatch[0] : firstLine).trim();
-          const overlap = { file: rule.path, heading: h, orgSentence, plugins };
-          if (stale) {
-            staleSuppressed.push(overlap);
-          } else {
-            drifts.push(overlap);
+      const collect = (spaceRules: RuleFile[], spaceOrg: RuleFile): void => {
+        // Populated org headings only — multi-line-comment-only headings
+        // (e.g. ## Corrections) read as empty and are excluded.
+        const orgPopulated = new Map<string, string>();
+        for (const [h, text] of spaceOrg.headings) {
+          if (text.trim() !== "") orgPopulated.set(h, text);
+        }
+        // A plugin's composed rule block (plugin memory/ files) populates a
+        // heading like a team line does, and the overlap names the plugin so
+        // the reviewer knows whose rule to weigh. In a phase file only a
+        // plugin's block is read: the phase layer is the framework's own text
+        // otherwise, and never a team practice.
+        for (const rule of spaceRules) {
+          if (rule.scope !== "team" && rule.scope !== "project" && rule.scope !== "phase") continue;
+          const stale = isRuleStale(rule.frontmatter, today);
+          for (const [h, text] of rule.headings) {
+            if (text.trim() === "") continue;
+            const orgText = orgPopulated.get(h);
+            if (orgText === undefined) continue;
+            const plugins = [...(rule.pluginHeadings.get(h) ?? [])].sort();
+            if (rule.scope === "phase" && plugins.length === 0) continue;
+            // First sentence of the org body under that heading, quoted
+            // verbatim. Split on the first sentence terminator; fall back to
+            // the whole first non-empty line when none is present.
+            const firstLine = orgText.split("\n")[0] ?? orgText;
+            const sentenceMatch = firstLine.match(/^.*?[.!?](?=\s|$)/);
+            const orgSentence = (sentenceMatch ? sentenceMatch[0] : firstLine).trim();
+            const overlap = { file: rule.path, heading: h, orgSentence, plugins };
+            if (stale) {
+              staleSuppressed.push(overlap);
+            } else {
+              drifts.push(overlap);
+            }
           }
+        }
+      };
+      collect(rules, org);
+      if (!process.env.AIDLC_RULES_DIR) {
+        for (const { name: space } of listSpaces(projectDir)) {
+          if (space === DEFAULT_SPACE) continue;
+          const spaceRules = loadRules(space);
+          const spaceOrg = spaceRules.find((r) => r.scope === "org" && r.path.endsWith("org.md"));
+          if (spaceOrg) collect(spaceRules, spaceOrg);
         }
       }
       const describe = (d: Overlap, arrow: string): string =>
@@ -12034,7 +12050,12 @@ function handleSpaceCreate(projectDir: string, positional: string[], _flags: Rec
 
   // Copy the org.md baseline from the default space (the always-present SEED
   // shell). If absent (a malformed shell), fall back to an empty stub rather
-  // than dying — the resolver tolerates an empty/absent rules dir.
+  // than dying — the resolver tolerates an empty/absent rules dir. A plugin's
+  // rule blocks in it come along as they are, so the new space has the
+  // plugin's org rules at once; the next compose (session start, or plugin
+  // sync) merges into every space, takes these blocks over, replaces a
+  // changed one and cuts one the plugin no longer ships, and adds the
+  // plugin's phase, team and project rules, so nothing here stays frozen.
   const orgSrc = join(spacesRoot(projectDir), DEFAULT_SPACE, "memory", "org.md");
   const orgDest = join(memoryDest, "org.md");
   if (existsSync(orgSrc)) {

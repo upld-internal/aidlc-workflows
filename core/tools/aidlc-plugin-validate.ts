@@ -30,7 +30,7 @@ import {
   type ValidationContext,
   validateStageFrontmatter,
 } from "./aidlc-stage-schema.ts";
-import { resolveHarnessPath } from "./aidlc-runtime-paths.ts";
+import { resolveHarnessPath, SPACE_NAME_REGEX } from "./aidlc-runtime-paths.ts";
 
 export type PluginValidationRule =
   | "plugin-root"
@@ -165,8 +165,8 @@ const PLUGIN_SYMLINK_SCAN_DIRS = [
 // memory tree: the same files the engine seeds from core/memory/, so a rule
 // lands in the layer (org, team, project, phase) the team reads it in. The
 // compose hook, plugin sync, the disable-time strip and doctor resolve a
-// recorded memory target to a file only through this list, never by building
-// a path from the record.
+// recorded memory target to a file only through this list and the space-name
+// grammar, never by building a path from the record.
 export const PLUGIN_MEMORY_FILES = [
   "org.md",
   "team.md",
@@ -179,17 +179,45 @@ export const PLUGIN_MEMORY_FILES = [
 export type PluginMemoryFile = (typeof PLUGIN_MEMORY_FILES)[number];
 // The contribution sidecar key for a memory file's record.
 export const PLUGIN_MEMORY_RECORD_PREFIX = "memory/";
+// The space every project starts in; its records keep the short key.
+export const PLUGIN_MEMORY_DEFAULT_SPACE = "default";
 
-export function pluginMemoryRecordKey(rel: PluginMemoryFile): string {
-  return `${PLUGIN_MEMORY_RECORD_PREFIX}${rel}`;
+// A memory file in one space: what a sidecar memory key names.
+export interface PluginMemoryTarget {
+  space: string;
+  file: PluginMemoryFile;
 }
 
-// The memory file a sidecar key names, or null when the key is not a memory
-// record (a stage or persona slug) or names a file outside the list.
-export function pluginMemoryFileOfRecord(key: string): PluginMemoryFile | null {
+// `memory/<file>` for the default space (the key the first memory-merging
+// release wrote, so a composed project needs no migration) and
+// `memory/<space>/<file>` for any other space. The two forms cannot collide:
+// a space name is one path segment, so the second form has a segment the
+// file list's entries never carry in that position (`<space>/org.md` is not a
+// listed file, and `phases/<x>.md` would need `phases` as the space with a
+// bare `<x>.md`, which the list does not hold).
+export function pluginMemoryRecordKey(file: PluginMemoryFile, space: string = PLUGIN_MEMORY_DEFAULT_SPACE): string {
+  return space === PLUGIN_MEMORY_DEFAULT_SPACE
+    ? `${PLUGIN_MEMORY_RECORD_PREFIX}${file}`
+    : `${PLUGIN_MEMORY_RECORD_PREFIX}${space}/${file}`;
+}
+
+// The space and memory file a sidecar key names, or null when the key is not
+// a memory record (a stage or persona slug), names a file outside the list,
+// or names a space outside the grammar `space create` gives a name (the
+// default space is named only by the short form).
+export function pluginMemoryTargetOfRecord(key: string): PluginMemoryTarget | null {
   if (!key.startsWith(PLUGIN_MEMORY_RECORD_PREFIX)) return null;
-  const rel = key.slice(PLUGIN_MEMORY_RECORD_PREFIX.length);
-  return (PLUGIN_MEMORY_FILES as readonly string[]).includes(rel) ? rel as PluginMemoryFile : null;
+  const rest = key.slice(PLUGIN_MEMORY_RECORD_PREFIX.length);
+  if ((PLUGIN_MEMORY_FILES as readonly string[]).includes(rest)) {
+    return { space: PLUGIN_MEMORY_DEFAULT_SPACE, file: rest as PluginMemoryFile };
+  }
+  const slash = rest.indexOf("/");
+  if (slash === -1) return null;
+  const space = rest.slice(0, slash);
+  const file = rest.slice(slash + 1);
+  if (space === PLUGIN_MEMORY_DEFAULT_SPACE || !SPACE_NAME_REGEX.test(space)) return null;
+  if (!(PLUGIN_MEMORY_FILES as readonly string[]).includes(file)) return null;
+  return { space, file: file as PluginMemoryFile };
 }
 
 // One `## Heading` of a plugin memory file with the rule lines under it, as
