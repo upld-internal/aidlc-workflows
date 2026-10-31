@@ -101,8 +101,9 @@ path without attributing it to the plugin currently composing.
 `contributions/`, whose files are consumed by the merge rather than copied as a
 primitive subtree.
 
-`memory` projection remains deferred. Do not declare `contributes.memory` yet:
-the authoring tools reject it until the default-space method-seed merge ships.
+`memory` is the plugin's rule files (`memory/{org,team,project}.md`,
+`memory/phases/<phase>.md`), merged into the default space's memory under the
+same `## Heading`s rather than copied; see §4, Method/rules.
 
 Ship only the keys your plugin uses. `test-pro` ships a support agent, a plugin
 scope, and per-agent methodology knowledge; it still reuses
@@ -352,8 +353,8 @@ strips them before it re-composes.
 ## 4. Packaging the other primitives
 
 `test-pro` ships stages, contributions, sensors, a support agent, a scope, and
-methodology knowledge. A richer plugin may also add method/rules later; memory
-projection remains deferred (doc 18 §9 Status).
+methodology knowledge, and two rules for the default space's memory (one in
+`org.md`, one in `phases/construction.md`).
 
 - **Agents.** Drop `agents/<plugin>-<role>-agent.md` with `plugin:` set. The
   plugin prefix replaces core's `aidlc-` filename prefix, and the filename stem
@@ -391,13 +392,45 @@ projection remains deferred (doc 18 §9 Status).
   names the file and the required shape, rather than letting it land dead. Bind
   the sensor to your own stages via `sensors:`, or to a core stage via a
   contribution's `adds.sensors`. See [Sensors](06-sensors.md).
-- **Method/rules.** *(⏳ deferred.)* A future `contributes.memory` surface will
-  merge `memory/phases/<phase>.md` and `memory/{org,team,project}.md` into the
-  default-space method seed (`aidlc/spaces/default/memory/`). The packager and
-  compose hook do not project that subtree yet, and the authoring tools reject
-  the declaration so a build cannot report success while omitting it. Do
-  **not** ship a `rules/` dir — that path is no longer read (the rule layer moved
-  into per-space memory). See [Rules and the Loop](05-rules-and-the-loop.md).
+- **Method/rules.** Declare `"memory": "memory/"` and ship the space's rule
+  files by name: `memory/org.md`, `memory/team.md`, `memory/project.md`, and
+  `memory/phases/{ideation,inception,construction,operation}.md` (any other
+  name is a validate error, as is frontmatter or a rule line under no
+  heading). Each file holds rule lines (bullets, or `Field: value` lines) under
+  the `## Heading`s of the file it names; a `# title` line, prose before the
+  first heading is not, and HTML comments are ignored:
+
+  ```markdown
+  # acme rules
+
+  ## Testing Posture
+
+  - Every Bolt's test report names the coverage it measured.
+
+  ## Deployment
+
+  - A production deploy is tagged before it ships.
+  ```
+
+  Compose merges each heading's lines into `aidlc/spaces/default/memory/<file>`
+  under the same heading, inside one block your plugin owns
+  (`<!-- plugin:acme:section:testing-posture:0:<hash> -->` … `<!-- /plugin:… -->`),
+  at the end of the section; a heading the file lacks is created inside the
+  block. A line the section already holds outside any plugin block is not
+  repeated (set-union), so a team that already wrote your rule keeps its own
+  line. Re-composing changes nothing; a changed rule replaces your block; a
+  heading you stop shipping is removed with its record; turning your plugin
+  off or pruning it removes exactly your blocks. The team's own lines, before
+  and after your block, are never edited, and `aidlc config` refresh leaves
+  these files alone. Pick the layer the way the team would: `org.md` is the
+  baseline every project inherits (doctor's rule-drift row then measures team
+  and project rules against yours), while `team.md` is itself measured against
+  the framework's `org.md` defaults; either way an overlap names your plugin.
+  Your rules reach the **default space only**: a project that works in another
+  space (`aidlc/spaces/<name>/memory/`) does not get them there, and a space
+  created later holds at most a frozen copy of your `org.md` block.
+  Do **not** ship a `rules/` dir — that path is no longer read (the rule layer
+  moved into per-space memory). See [Rules and the Loop](05-rules-and-the-loop.md).
 - **Knowledge.** Ship per-agent **methodology** knowledge under
   `knowledge/<agent-slug>/`, projected into the framework-shipped
   `<harness>/knowledge/` tree and loaded when that agent leads or supports a
@@ -817,8 +850,8 @@ skipped result, so a green test run can mean the live check did not run.
   it may not collide with a core artifact or another plugin's.
 - **Primitive names are unique.** Your scopes/agents/sensors may not
   collide with core or another plugin — a collision is a compose error with
-  attribution. (Method files are not a plugin contribution yet: the validator
-  rejects `contributes.memory`.)
+  attribution. (Memory files are shared by design: your rules land in the
+  space's own files, in blocks marked with your plugin's name.)
 - **One base at most.** A plugin builds on core and at most one base plugin:
   `"dependencies": ["core", "acme@^1.2.0"]`. The base itself builds on core
   alone. Sync composes the base first, so your stages can order after its

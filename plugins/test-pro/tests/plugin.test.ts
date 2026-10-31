@@ -22,6 +22,7 @@ import {
   cpSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -53,6 +54,11 @@ describe("test-pro plugin own content validation", () => {
       walkMarkdownFiles(join(PLUGIN_ROOT, "contributions")).length,
     ).toBeGreaterThan(0);
   });
+
+  test("ships one org rule and one construction-phase rule for the default space's memory", () => {
+    expect(walkMarkdownFiles(join(PLUGIN_ROOT, "memory")).map((file) => file.slice(PLUGIN_ROOT.length + 1)).sort())
+      .toEqual(["memory/org.md", "memory/phases/construction.md"]);
+  });
 });
 
 describe(`${PLUGIN_NAME} plugin — composed doctor check`, () => {
@@ -83,6 +89,15 @@ describe(`${PLUGIN_NAME} plugin — composed doctor check`, () => {
 
   afterAll(() => {
     if (tmp) rmSync(tmp, { recursive: true, force: true });
+  });
+
+  test("compose merges the plugin's rules under their headings in the default space's memory", () => {
+    const org = readFileSync(join(project, "aidlc", "spaces", "default", "memory", "org.md"), "utf-8");
+    const construction = readFileSync(join(project, "aidlc", "spaces", "default", "memory", "phases", "construction.md"), "utf-8");
+    expect(org).toContain("<!-- plugin:test-pro:section:testing-posture:0:");
+    expect(org).toContain("names the branch and line coverage it measured");
+    expect(construction).toContain("<!-- plugin:test-pro:section:testing-standards:0:");
+    expect(construction).toContain("one step past each");
   });
 
   test("doctor surfaces the plugin's reference checks after compose", () => {

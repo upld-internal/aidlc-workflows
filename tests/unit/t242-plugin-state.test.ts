@@ -28,6 +28,8 @@ import {
   comparePluginState,
   discoverPluginInventory,
   fragmentProseHash,
+  contributionSources,
+  memoryContributionSources,
   main as pluginMain,
   normalizeInstalledPlugin,
   pluginSourceHash,
@@ -667,6 +669,46 @@ describe("t242 pure status comparator", () => {
 });
 
 // Sync composes a plugin again only when one of its recorded additions is gone.
+// The default space's memory files are contribution sources too, by their
+// sidecar key, so doctor and sync read a plugin's rule blocks like fragments.
+describe("t242 memory contribution sources", () => {
+  test("the default space's rule files are keyed memory/<file>, read as LF, and nothing else is", () => {
+    const projectDir = mkdtempSync(join(tmpdir(), "aidlc-t242-memory-"));
+    try {
+      const memoryDir = join(projectDir, "aidlc", "spaces", "default", "memory");
+      mkdirSync(join(memoryDir, "phases"), { recursive: true });
+      writeFileSync(join(memoryDir, "org.md"), "# Org\r\n\r\n## Testing Posture\r\n\r\n- a\r\n");
+      writeFileSync(join(memoryDir, "phases", "construction.md"), "## Testing Standards\n\n- b\n");
+      writeFileSync(join(memoryDir, "team-overrides.md"), "## Not read\n");
+      writeFileSync(join(memoryDir, "phases", "initialization.md"), "## Not read\n");
+      const sources = memoryContributionSources(projectDir);
+      expect([...sources.keys()].sort()).toEqual(["memory/org.md", "memory/phases/construction.md"]);
+      expect(sources.get("memory/org.md")).toMatchObject({
+        kind: "memory",
+        content: "# Org\n\n## Testing Posture\n\n- a\n",
+        parsed: {},
+      });
+      const all = contributionSources(
+        join(projectDir, ".claude", "aidlc-common", "stages"),
+        join(projectDir, ".claude", "agents"),
+        projectDir,
+        "claude",
+        ".claude",
+      );
+      expect(all.get("memory/phases/construction.md")?.kind).toBe("memory");
+      const block = fragmentProseHash("- b");
+      expect(recordedContributionGaps({}, `## Testing Standards\n\n<!-- plugin:acme:section:testing-standards:0:${block} -->\n- b\n<!-- /plugin:acme:section:testing-standards:0:${block} -->\n`, "acme", {
+        fragments: [{ anchor: "section:testing-standards", order: 0, hash: block }],
+      })).toEqual({ missing: [], gone: false });
+      expect(recordedContributionGaps({}, all.get("memory/phases/construction.md")!.content, "acme", {
+        fragments: [{ anchor: "section:testing-standards", order: 0, hash: block }],
+      })).toEqual({ missing: [`fragments=[section:testing-standards@0:${block}]`], gone: true });
+    } finally {
+      rmSync(projectDir, { recursive: true, force: true });
+    }
+  });
+});
+
 // A fragment nested inside its own plugin's fragment is gone; prose that quotes
 // the marker syntax, or names another plugin's marker, is the plugin's text.
 describe("t242 recorded additions", () => {

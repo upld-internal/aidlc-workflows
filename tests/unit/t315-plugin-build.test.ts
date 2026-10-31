@@ -191,6 +191,13 @@ describe("t315 standalone plugin builder", () => {
         treeDiff(join(EXPECTED_ROOT, harness), outDir, asShippedBuild(harness)),
         harness,
       ).toEqual([]);
+      // The plugin's rule files travel with every projection, as authored:
+      // compose merges them into the project's memory; nothing copies them.
+      const built = treeFiles(outDir);
+      const memoryFiles = [...built.keys()].filter((name) => /(^|\/)memory\//.test(name)).map((name) => name.replace(/^.*\/memory\//, "memory/"));
+      expect(memoryFiles.sort(), harness).toEqual(["memory/org.md", "memory/phases/construction.md"]);
+      const org = [...built.entries()].find(([name]) => name.endsWith("memory/org.md"))![1];
+      expect(org.equals(readFileSync(join(SOURCE_PLUGIN, "memory", "org.md")))).toBe(true);
     }
   });
 

@@ -19,7 +19,11 @@ test coverage** rather than the baseline unit/integration tests core ships. It:
 - **ships two advisory sensors** that read the machine-readable results and report
   coverage-threshold and requirement-coverage gaps; and
 - **ships a read-only doctor check** that verifies its composed sensors, scope,
-  and support agent are installed.
+  and support agent are installed; and
+- **adds two rules to the default space's memory** (one under `## Testing
+  Posture` in `org.md`, one under `## Testing Standards` in
+  `phases/construction.md`), each in a block the plugin owns, so every stage
+  reads them with the team's own rules.
 
 It reuses the framework's `aidlc-quality-agent` as the test lead and ships
 `test-pro-metrics-agent` as a support persona.
@@ -107,6 +111,8 @@ plugins/test-pro/
   sensors/aidlc-<id>.md              # 2 advisory sensor manifests
   tools/aidlc-sensor-*.ts            # the 2 sensor scripts (self-contained)
   tools/test-pro-doctor.ts            # read-only composed-install checks
+  memory/org.md                      # an org-layer rule, merged under its ## heading
+  memory/phases/construction.md      # a construction-phase rule, likewise
   tests/plugin.test.ts               # the plugin's own content validation
   README.md
 ```
